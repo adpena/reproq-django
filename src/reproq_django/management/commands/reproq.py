@@ -78,6 +78,7 @@ class Command(BaseCommand):
     def run_check(self):
         self.stdout.write("Checking Reproq configuration...")
         worker_bin, resolved_bin, exists = self._resolve_worker_bin()
+        self.stdout.write(f"Resolved worker binary: {resolved_bin or worker_bin}")
         try:
             version = subprocess.check_output([worker_bin, "--version"]).decode().strip()
             self.stdout.write(self.style.SUCCESS(f"✅ Worker binary: {version}"))
@@ -90,6 +91,7 @@ class Command(BaseCommand):
         if dsn:
             source = "DATABASE_URL" if os.environ.get("DATABASE_URL") else "DATABASES"
             self.stdout.write(self.style.SUCCESS(f"✅ Database DSN detected ({source})."))
+            self.stdout.write(f"DSN: {self._mask_dsn(dsn)}")
         else:
             self.stderr.write(self.style.ERROR("❌ Database DSN not detected."))
             self.stderr.write(
@@ -136,6 +138,9 @@ class Command(BaseCommand):
             bin_dir = os.path.join(os.getcwd(), ".reproq", "bin")
             target_path = os.path.join(bin_dir, f"reproq{ext}")
         os.makedirs(bin_dir, exist_ok=True)
+        if override_path:
+            self.stdout.write(f"Override path: {override_path}")
+        self.stdout.write(f"Platform: {system}/{arch}")
         self.stdout.write(f"Target path: {target_path}")
 
         with tempfile.NamedTemporaryFile(delete=False) as tmp_file:
@@ -148,7 +153,7 @@ class Command(BaseCommand):
             if tag == "latest":
                 url = f"https://github.com/adpena/reproq-worker/releases/latest/download/{bin_name}"
 
-            self.stdout.write(f"Downloading pre-built binary for {system}/{arch}...")
+            self.stdout.write(f"Downloading pre-built binary: {url}")
             try:
                 with urllib.request.urlopen(url) as response:
                     with open(tmp_path, 'wb') as f:
@@ -158,14 +163,25 @@ class Command(BaseCommand):
                 self.stdout.write(self.style.WARNING(f"Download failed: {e}"))
 
         if not success:
-            source_path = options.get("source") or os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))), "reproq-worker")
+            source_path = options.get("source") or os.path.join(
+                os.path.dirname(
+                    os.path.dirname(
+                        os.path.dirname(
+                            os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+                        )
+                    )
+                ),
+                "reproq-worker",
+            )
             if os.path.exists(source_path):
                 self.stdout.write(f"Building from local source: {source_path}...")
                 try:
                     subprocess.run(["go", "build", "-o", tmp_path, "./cmd/reproq"], cwd=source_path, check=True)
                     success = True
-                except:
-                    pass
+                except Exception as e:
+                    self.stderr.write(self.style.WARNING(f"Local build failed: {e}"))
+            else:
+                self.stdout.write(self.style.WARNING(f"Local source not found: {source_path}"))
 
         if not success:
             self.stderr.write(self.style.ERROR("Failed to install worker."))
@@ -241,6 +257,8 @@ WantedBy=multi-user.target
             raise CommandError(
                 "DATABASE_URL not set. Reproq worker requires a Postgres DSN."
             )
+        self.stdout.write(f"Worker binary: {resolved_bin or worker_bin}")
+        self.stdout.write(f"DSN: {self._mask_dsn(dsn)}")
         args = [worker_bin, cmd, "--dsn", dsn]
         if cmd == "worker":
             args.extend(["--concurrency", str(options["concurrency"])])
@@ -332,3 +350,21 @@ WantedBy=multi-user.target
             resolved = shutil.which(worker_bin)
         exists = bool(resolved and os.path.exists(resolved))
         return worker_bin, resolved, exists
+
+    def _mask_dsn(self, dsn):
+        try:
+            from urllib.parse import urlparse
+        except Exception:
+            return "<unavailable>"
+        try:
+            parsed = urlparse(dsn)
+        except Exception:
+            return "<invalid>"
+        if not parsed.scheme:
+            return "<invalid>"
+        host = parsed.hostname or ""
+        port = f":{parsed.port}" if parsed.port else ""
+        user = parsed.username or ""
+        db = parsed.path.lstrip("/") if parsed.path else ""
+        user_part = f"{user}@" if user else ""
+        return f"{parsed.scheme}://{user_part}{host}{port}/{db}"
