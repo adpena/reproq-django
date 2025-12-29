@@ -1,11 +1,13 @@
 import argparse
-import json
-import sys
-import os
-import traceback
-import signal
 import asyncio
+import contextlib
 import inspect
+import io
+import json
+import os
+import signal
+import sys
+import traceback
 from typing import Any
 
 def setup_django(settings_module: str = None):
@@ -28,6 +30,16 @@ def execute():
 
     args = parser.parse_args()
 
+    def emit_result(payload, exit_code=None):
+        print(json.dumps(payload), file=sys.stdout)
+        sys.stdout.flush()
+        if exit_code is not None:
+            sys.exit(exit_code)
+
+    def debug_log(message):
+        if os.environ.get("REPROQ_EXECUTOR_DEBUG"):
+            print(f"[reproq executor] {message}", file=sys.stderr)
+
     # Load payload
     try:
         if args.payload_stdin:
@@ -40,12 +52,15 @@ def execute():
         
         spec = json.loads(payload_raw)
     except Exception as e:
-        print(json.dumps({
-            "ok": False,
-            "exception_class": "PayloadError",
-            "message": f"Failed to parse payload: {str(e)}"
-        }), file=sys.stdout)
-        sys.exit(1)
+        debug_log(f"Failed to parse payload: {e}")
+        emit_result(
+            {
+                "ok": False,
+                "exception_class": "PayloadError",
+                "message": f"Failed to parse payload: {str(e)}",
+            },
+            exit_code=1,
+        )
 
     setup_django(args.settings or spec.get("django", {}).get("settings_module"))
 
@@ -55,12 +70,15 @@ def execute():
     try:
         callable_task = import_string(task_path)
     except Exception as e:
-        print(json.dumps({
-            "ok": False,
-            "exception_class": "ImportError",
-            "message": f"Failed to import task {task_path}: {str(e)}"
-        }), file=sys.stdout)
-        sys.exit(1)
+        debug_log(f"Failed to import task {task_path}: {e}")
+        emit_result(
+            {
+                "ok": False,
+                "exception_class": "ImportError",
+                "message": f"Failed to import task {task_path}: {str(e)}",
+            },
+            exit_code=1,
+        )
 
     # Context for task
     context = {
@@ -74,12 +92,15 @@ def execute():
 
     # Signal handling
     def signal_handler(sig, frame):
-        print(json.dumps({
-            "ok": False,
-            "exception_class": "Terminated",
-            "message": f"Task terminated by signal {sig}"
-        }), file=sys.stdout)
-        sys.exit(1)
+        debug_log(f"Task terminated by signal {sig}")
+        emit_result(
+            {
+                "ok": False,
+                "exception_class": "Terminated",
+                "message": f"Task terminated by signal {sig}",
+            },
+            exit_code=1,
+        )
     
     signal.signal(signal.SIGTERM, signal_handler)
     signal.signal(signal.SIGINT, signal_handler)
@@ -87,15 +108,26 @@ def execute():
     try:
         task_args = spec.get("args", [])
         task_kwargs = spec.get("kwargs", {})
-        
-        if spec.get("takes_context") or getattr(callable_task, "takes_context", False):
-            result_val = callable_task(context, *task_args, **task_kwargs)
-        else:
-            result_val = callable_task(*task_args, **task_kwargs)
-        
-        # Support for async tasks
-        if inspect.iscoroutine(result_val):
-            result_val = asyncio.run(result_val)
+        debug_log(f"Executing task {task_path} (result_id={args.result_id}, attempt={args.attempt})")
+
+        stdout_capture = io.StringIO()
+        with contextlib.redirect_stdout(stdout_capture):
+            if spec.get("takes_context") or getattr(callable_task, "takes_context", False):
+                result_val = callable_task(context, *task_args, **task_kwargs)
+            else:
+                result_val = callable_task(*task_args, **task_kwargs)
+
+            # Support for async tasks
+            if inspect.iscoroutine(result_val):
+                result_val = asyncio.run(result_val)
+
+        captured_stdout = stdout_capture.getvalue()
+        if captured_stdout:
+            print(
+                f"[reproq executor] Task wrote {len(captured_stdout)} bytes to stdout; suppressed.",
+                file=sys.stderr,
+            )
+            debug_log(f"Captured stdout:\n{captured_stdout}")
         
         # Verify serializability
         try:
@@ -103,16 +135,19 @@ def execute():
         except TypeError:
             raise TypeError(f"Return value of type {type(result_val)} is not JSON serializable")
 
-        print(json.dumps({"ok": True, "return": result_val}), file=sys.stdout)
+        emit_result({"ok": True, "return": result_val})
 
     except Exception as e:
-        print(json.dumps({
-            "ok": False,
-            "exception_class": e.__class__.__name__,
-            "message": str(e),
-            "traceback": traceback.format_exc()
-        }), file=sys.stdout)
-        sys.exit(1)
+        debug_log(f"Task execution failed: {e}")
+        emit_result(
+            {
+                "ok": False,
+                "exception_class": e.__class__.__name__,
+                "message": str(e),
+                "traceback": traceback.format_exc(),
+            },
+            exit_code=1,
+        )
 
 if __name__ == "__main__":
     execute()
