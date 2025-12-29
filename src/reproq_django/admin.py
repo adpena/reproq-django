@@ -1,4 +1,6 @@
+import hashlib
 import json
+import uuid
 from django.contrib import admin, messages
 from django.utils.safestring import mark_safe
 from django.utils.html import format_html
@@ -59,7 +61,12 @@ class TaskRunAdmin(admin.ModelAdmin):
         "pretty_spec", "pretty_errors", "pretty_return", "duplicate_specs"
     ]
     
-    actions = ["replay_tasks", "retry_failed_tasks", "cancel_tasks"]
+    actions = [
+        "replay_tasks",
+        "retry_failed_tasks",
+        "cancel_tasks",
+        "create_expired_lease_test_task",
+    ]
 
     def status_badge(self, obj):
         colors = {
@@ -165,5 +172,47 @@ class TaskRunAdmin(admin.ModelAdmin):
         updated = queryset.filter(status__in=["READY", "RUNNING"]).update(cancel_requested=True)
         queryset.filter(status="READY").update(status="CANCELLED")
         self.message_user(request, f"Requested cancellation for {updated} tasks.", messages.SUCCESS)
+
+    @admin.action(description="Create expired-lease test task (for reclaim)")
+    def create_expired_lease_test_task(self, request, queryset):
+        spec = {
+            "v": 1,
+            "task_path": "reproq_django.tasks.debug_noop_task",
+            "args": [],
+            "kwargs": {"sleep_seconds": 0},
+            "takes_context": False,
+            "queue_name": "default",
+            "priority": 0,
+            "run_after": None,
+            "exec": {
+                "timeout_seconds": 900,
+                "max_attempts": 3,
+            },
+            "provenance": {
+                "reclaim_test_id": str(uuid.uuid4()),
+            },
+        }
+        spec_str = json.dumps(spec, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+        spec_hash = hashlib.sha256(spec_str.encode("utf-8")).hexdigest()
+        run = TaskRun.objects.create(
+            backend_alias="default",
+            queue_name=spec["queue_name"],
+            priority=spec["priority"],
+            run_after=None,
+            spec_json=spec,
+            spec_hash=spec_hash,
+            status="RUNNING",
+            errors_json=[],
+            attempts=0,
+            max_attempts=spec["exec"]["max_attempts"],
+            timeout_seconds=spec["exec"]["timeout_seconds"],
+            leased_until=timezone.now() - timedelta(minutes=10),
+            leased_by="admin-expired-lease",
+        )
+        self.message_user(
+            request,
+            f"Created expired-lease test task (result_id={run.result_id}).",
+            messages.SUCCESS,
+        )
 
     def has_add_permission(self, request): return False
