@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "reproq-django"
+version = "0.1.0"
+description = "Django 6.0 Tasks backend for reproq-worker (Postgres queue + deterministic runner)"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+  "Django>=6.0",
+]
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
