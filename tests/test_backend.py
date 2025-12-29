@@ -16,7 +16,12 @@ if not settings.configured:
     settings.configure(
         DATABASES={"default": {"ENGINE": "django.db.backends.sqlite3", "NAME": ":memory:"}},
         INSTALLED_APPS=["reproq_django"],
-        TASKS={"default": {"BACKEND": "reproq_django.backend.ReproqBackend"}},
+        TASKS={
+            "default": {
+                "BACKEND": "reproq_django.backend.ReproqBackend",
+                "QUEUES": ["default", "test-queue", "q"],
+            }
+        },
     )
     import django
     django.setup()
@@ -25,14 +30,19 @@ from reproq_django.backend import ReproqBackend
 from reproq_django.proxy import TaskResultProxy
 from reproq_django.models import TaskRun, PeriodicTask, Worker
 
+def my_func(*args, **kwargs):
+    return args or kwargs
+
 class TestReproqBackend(unittest.TestCase):
     def setUp(self):
         from django.core.management import call_command
         call_command('migrate', verbosity=0)
-        self.backend = ReproqBackend(alias="default", params={})
+        self.backend = ReproqBackend(
+            alias="default",
+            params={"QUEUES": ["default", "test-queue", "q"]},
+        )
 
     def test_enqueue_creates_model(self):
-        def my_func(x, y): return x + y
         my_func.__module__ = "test_module"
 
         task = Task(func=my_func, priority=10, queue_name="test-queue", backend="default", run_after=None)
@@ -49,7 +59,6 @@ class TestReproqBackend(unittest.TestCase):
         self.assertEqual(run.spec_json["kwargs"], {"debug": True})
 
     def test_dedupe_active(self):
-        def my_func(x): return x
         my_func.__module__ = "test_module"
         task = Task(func=my_func, priority=0, queue_name="q", backend="default", run_after=None)
 

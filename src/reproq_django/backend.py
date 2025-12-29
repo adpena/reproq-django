@@ -89,6 +89,12 @@ class ReproqBackend(BaseTaskBackend):
         if not dedup:
             return self.get_result(_try_insert())
 
+        existing = TaskRun.objects.filter(
+            spec_hash=spec_hash, status__in=["READY", "RUNNING"]
+        ).first()
+        if existing:
+            return self.get_result(existing.result_id)
+
         try:
             return self.get_result(_try_insert())
         except IntegrityError:
