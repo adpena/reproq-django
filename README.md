@@ -1,5 +1,8 @@
 # Reproq Django 🚀
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Documentation](https://img.shields.io/badge/Docs-View%20Online-indigo)](https://adpena.github.io/reproq-django/)
+
 **Deterministic Background Tasks for Django 6.0+ powered by Go.**
 
 Reproq is a production-grade tasks backend that combines the ease of Django with the performance and reliability of a Go-based runner. It uses PostgreSQL as its only dependency—no Redis or RabbitMQ required.
