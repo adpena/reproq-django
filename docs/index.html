@@ -77,6 +77,11 @@
         "BACKEND": "reproq_django.backend.ReproqBackend",
     }
 }</pre>
+
+                <h4 class="font-bold mt-4">4. Migrate</h4>
+                <p>Run worker schema setup before Django migrations.</p>
+                <pre>python manage.py reproq migrate-worker
+python manage.py migrate --noinput</pre>
             </section>
 
             <section id="architecture" class="mb-16 prose prose-slate max-w-none">
@@ -121,6 +126,15 @@ chain(task_a, task_b, task_c).enqueue()</pre>
         "OPTIONS": { "DEDUP_ACTIVE": True }
     }
 }</pre>
+                <p>To force a unique run, include a unique identifier in the task arguments.</p>
+                <pre>import uuid
+
+deploy_id = str(uuid.uuid4())
+notify_deploy_success.enqueue(deploy_id=deploy_id)</pre>
+                <p>For safer deploys, consider accepting <code>**kwargs</code> so older workers can ignore new fields.</p>
+                <pre>@task
+def send_welcome_email(user_id, **_kwargs):
+    return f"Email sent to {user_id}"</pre>
             </section>
 
             <section id="payloads" class="mb-16 prose prose-slate max-w-none">
