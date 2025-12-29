@@ -65,6 +65,9 @@ python manage.py reproq install
 python manage.py migrate
 python manage.py reproq migrate-worker
 ```
+If you previously applied the legacy Reproq Worker SQL migrations, run
+`migrations/000013_convert_worker_arrays_to_jsonb.up.sql` from the
+reproq-worker repo to convert array columns to JSONB.
 
 ### 5. Start the Worker
 ```bash

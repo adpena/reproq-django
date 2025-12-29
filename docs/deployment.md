@@ -55,6 +55,13 @@ The Go worker needs access to your database. It respects the following:
 - `REPROQ_WORKER_BIN`: Optional explicit path to the worker binary. If set, `python manage.py reproq install` writes the binary to this path.
   If unset, the default install target is `./.reproq/bin/reproq`.
 
+### Schema Compatibility
+Reproq Django uses JSONB columns for worker metadata (`task_runs.worker_ids` and
+`reproq_workers.queues`). If you previously applied the legacy reproq-worker SQL
+migrations that created array columns, apply
+`migrations/000013_convert_worker_arrays_to_jsonb.up.sql` from the reproq-worker
+repo before starting the worker.
+
 ## 3. Worker Concurrency
 
 The number of concurrent tasks a single worker process can handle is configurable.
@@ -76,3 +83,14 @@ The Reproq Admin uses standard Django Admin templates. Ensure your static files 
 ```bash
 python manage.py collectstatic
 ```
+
+## 6. Render Deployment Note
+
+When deploying on Render, run migrations during the pre-deploy step in this order:
+
+```bash
+python manage.py reproq migrate-worker
+python manage.py migrate --noinput
+```
+
+This ensures Postgres extensions are enabled before Django applies its migrations.
