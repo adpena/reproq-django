@@ -98,3 +98,9 @@ This ensures Postgres extensions are enabled before Django applies its migration
 After migrations complete, enqueue any deploy-time tasks (such as deploy
 notifications or periodic task seeds). Enqueuing before schema setup can
 fail silently or create partial task records.
+
+If you run worker + beat in the same service as the web process, avoid
+enqueueing deploy-time tasks in a pre-deploy hook. Older worker processes
+can still claim the task with outdated environment settings. Prefer a
+post-start enqueue guarded by a deploy identifier (for example,
+`RENDER_DEPLOY_ID`) so the task runs once per deploy.

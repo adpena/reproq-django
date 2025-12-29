@@ -20,6 +20,12 @@ buildCommand: |
   uv run python manage.py collectstatic --noinput
 ```
 
+## 1a. Deploy-Time Task Enqueues (Recommended Ordering)
+If you enqueue deploy-time tasks (like deploy notifications), prefer doing so
+after the worker starts. Pre-deploy hooks can still be serviced by old worker
+processes with outdated environment settings. On Render, you can guard the
+enqueue using `RENDER_DEPLOY_ID` so it only runs once per deploy.
+
 ## 2. Worker Service
 Background tasks require a separate service on Render. We recommend adding a **Background Worker** service.
 

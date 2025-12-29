@@ -154,6 +154,7 @@ def send_welcome_email(user_id, **_kwargs):
             <section id="production" class="mb-16">
                 <h2 class="text-3xl font-bold mb-6 text-slate-900 tracking-tight">Production Deployment</h2>
                 <p class="text-slate-600 mb-6 text-lg">Reproq is production-ready and includes automated tools for Linux systemd configuration.</p>
+                <p class="text-slate-600 mb-4 text-sm">For deploy-time tasks (like deploy notifications), enqueue them after the worker starts and guard with a deploy ID (for example, RENDER_DEPLOY_ID) so old workers do not claim them.</p>
                 
                 <div class="bg-slate-50 border border-slate-200 rounded-2xl p-8">
                     <h4 class="font-bold text-slate-800 mb-2">Automated systemd setup</h4>

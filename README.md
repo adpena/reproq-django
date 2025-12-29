@@ -211,6 +211,7 @@ Reproq is built for stability. We recommend using `systemd` to manage your worke
 **Option B: Single-service (web + worker + beat)**
 - Run the worker and beat in the same service as your web process.
 - Simpler to deploy, but less reliable: background processes are not supervised and can die silently.
+ - For deploy-time tasks (like deploy notifications), enqueue them after the worker starts and guard with a deploy ID (for example, `RENDER_DEPLOY_ID`) to avoid old workers claiming them.
 
 Example single-service start command:
 ```bash
