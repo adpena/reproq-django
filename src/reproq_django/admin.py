@@ -7,6 +7,8 @@ from django.utils.html import format_html
 from django.utils import timezone
 from django.db.models import Count, Q
 from datetime import timedelta
+from django.urls import path, reverse
+from django.http import HttpResponseRedirect
 from .models import TaskRun, Worker, PeriodicTask
 
 def format_json(field_data):
@@ -67,6 +69,18 @@ class TaskRunAdmin(admin.ModelAdmin):
         "cancel_tasks",
         "create_expired_lease_test_task",
     ]
+    change_list_template = "admin/reproq_django/taskrun/change_list.html"
+
+    def get_urls(self):
+        urls = super().get_urls()
+        custom_urls = [
+            path(
+                "create-expired-lease/",
+                self.admin_site.admin_view(self.create_expired_lease_view),
+                name="reproq_django_taskrun_create_expired_lease",
+            )
+        ]
+        return custom_urls + urls
 
     def status_badge(self, obj):
         colors = {
@@ -175,6 +189,23 @@ class TaskRunAdmin(admin.ModelAdmin):
 
     @admin.action(description="Create expired-lease test task (for reclaim)")
     def create_expired_lease_test_task(self, request, queryset):
+        run = self._create_expired_lease_task()
+        self.message_user(
+            request,
+            f"Created expired-lease test task (result_id={run.result_id}).",
+            messages.SUCCESS,
+        )
+
+    def create_expired_lease_view(self, request):
+        run = self._create_expired_lease_task()
+        self.message_user(
+            request,
+            f"Created expired-lease test task (result_id={run.result_id}).",
+            messages.SUCCESS,
+        )
+        return HttpResponseRedirect(reverse("admin:reproq_django_taskrun_changelist"))
+
+    def _create_expired_lease_task(self):
         spec = {
             "v": 1,
             "task_path": "reproq_django.tasks.debug_noop_task",
@@ -194,7 +225,7 @@ class TaskRunAdmin(admin.ModelAdmin):
         }
         spec_str = json.dumps(spec, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
         spec_hash = hashlib.sha256(spec_str.encode("utf-8")).hexdigest()
-        run = TaskRun.objects.create(
+        return TaskRun.objects.create(
             backend_alias="default",
             queue_name=spec["queue_name"],
             priority=spec["priority"],
@@ -208,11 +239,6 @@ class TaskRunAdmin(admin.ModelAdmin):
             timeout_seconds=spec["exec"]["timeout_seconds"],
             leased_until=timezone.now() - timedelta(minutes=10),
             leased_by="admin-expired-lease",
-        )
-        self.message_user(
-            request,
-            f"Created expired-lease test task (result_id={run.result_id}).",
-            messages.SUCCESS,
         )
 
     def has_add_permission(self, request): return False
