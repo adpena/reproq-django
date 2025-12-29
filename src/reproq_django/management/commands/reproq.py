@@ -111,9 +111,18 @@ class Command(BaseCommand):
 
     def run_install(self, options):
         self.stdout.write(self.style.MIGRATE_HEADING("Installing Reproq Go Worker..."))
-        pkg_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        bin_dir = os.path.join(pkg_dir, "bin")
-        os.makedirs(bin_dir, exist_ok=True)
+
+        override_path = getattr(settings, "REPROQ_WORKER_BIN", None) or os.environ.get(
+            "REPROQ_WORKER_BIN"
+        )
+        if override_path:
+            target_path = os.path.abspath(os.path.expanduser(str(override_path)))
+            bin_dir = os.path.dirname(target_path)
+            os.makedirs(bin_dir, exist_ok=True)
+        else:
+            pkg_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            bin_dir = os.path.join(pkg_dir, "bin")
+            os.makedirs(bin_dir, exist_ok=True)
         
         system = platform.system().lower()
         arch = platform.machine().lower()
@@ -122,7 +131,8 @@ class Command(BaseCommand):
         
         ext = ".exe" if system == "windows" else ""
         bin_name = f"reproq-{system}-{arch}{ext}"
-        target_path = os.path.join(bin_dir, f"reproq{ext}")
+        if not override_path:
+            target_path = os.path.join(bin_dir, f"reproq{ext}")
 
         with tempfile.NamedTemporaryFile(delete=False) as tmp_file:
             tmp_path = tmp_file.name

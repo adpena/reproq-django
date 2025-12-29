@@ -250,6 +250,9 @@ TASKS = {
 REPROQ_WORKER_BIN = "/usr/local/bin/reproq"
 ```
 
+If `REPROQ_WORKER_BIN` is set, `python manage.py reproq install` will install the
+binary at that path.
+
 ---
 
 ## 📋 Checklist for Production
