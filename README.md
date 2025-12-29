@@ -5,7 +5,17 @@
 
 **Deterministic Background Tasks for Django 6.0+ powered by Go.**
 
-Reproq is a production-grade tasks backend that combines the ease of Django with the performance and reliability of a Go-based runner. It uses PostgreSQL as its only dependency—no Redis or RabbitMQ required.
+Reproq is a production-grade tasks backend that combines the ease of Django with the performance and reliability of the [Reproq Worker](https://github.com/adpena/reproq-worker), a high-performance execution engine written in Go.
+
+---
+
+## 🤝 Relationship with Reproq Worker
+
+Reproq is split into two specialized components:
+1. **Reproq Django (this repo)**: The "Brain." It provides the Django 6.0 Tasks API, handles task definition, enqueuing, results, and the Admin dashboard.
+2. **[Reproq Worker](https://github.com/adpena/reproq-worker)**: The "Muscle." A standalone Go binary that polls the database and executes tasks with extreme efficiency and reliability.
+
+---
 
 ## Key Features
 
@@ -127,7 +137,21 @@ The `reproq` command is your primary tool for managing the task system.
 | `python manage.py reproq worker` | Starts the Go worker to process tasks. |
 | `python manage.py reproq beat` | Starts the Go scheduler for periodic tasks. |
 | `python manage.py reproq check` | Validates your settings and database connectivity. |
-| `python manage.py reproq migrate-worker` | Applies Go-specific SQL optimizations (if any). |
+| `python manage.py reproq systemd` | Generates systemd service files for production. |
+| `python manage.py reproq migrate-worker` | Applies Go-specific SQL optimizations. |
+
+---
+
+## 🚀 Production Deployment
+
+Reproq is designed to be easily managed in production using `systemd`.
+
+1. **Generate Service Files**:
+   ```bash
+   python manage.py reproq systemd
+   ```
+2. **Install & Start**:
+   Follow the on-screen instructions to move the files to `/etc/systemd/system/` and enable them. This ensures your worker and beat processes auto-restart on failure and start automatically on boot.
 
 ---
 
@@ -171,6 +195,16 @@ REPROQ_WORKER_BIN = "/usr/local/bin/reproq"
 - [ ] Configure `MAX_ATTEMPTS` and `TIMEOUT_SECONDS` for your workload.
 - [ ] Set up a process supervisor (like Systemd or Supervisor) for `python manage.py reproq worker`.
 - [ ] If using periodic tasks, ensure `python manage.py reproq beat` is also running (only one instance needed).
+
+## 🤝 Contributing & Feedback
+
+Reproq is an open-source project and we love contributions! 
+
+- **Found a bug?** Open an [issue](https://github.com/adpena/reproq-django/issues).
+- **Want a feature?** Let's discuss it in the issues or submit a PR.
+- **Questions?** Feel free to reach out or start a discussion.
+
+We are specifically looking for feedback on developer experience (DX) and performance in high-scale environments.
 
 ---
 
