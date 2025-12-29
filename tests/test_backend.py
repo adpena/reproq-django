@@ -35,7 +35,7 @@ class TestReproqBackend(unittest.TestCase):
         def my_func(x, y): return x + y
         my_func.__module__ = "test_module"
 
-        task = Task(func=my_func, priority=10, queue_name="test-queue", backend="default")
+        task = Task(func=my_func, priority=10, queue_name="test-queue", backend="default", run_after=None)
         result = self.backend.enqueue(task, (1, 2), {"debug": True})
         
         self.assertIsInstance(result, TaskResultProxy)
@@ -51,7 +51,7 @@ class TestReproqBackend(unittest.TestCase):
     def test_dedupe_active(self):
         def my_func(x): return x
         my_func.__module__ = "test_module"
-        task = Task(func=my_func, priority=0, queue_name="q", backend="default")
+        task = Task(func=my_func, priority=0, queue_name="q", backend="default", run_after=None)
 
         res1 = self.backend.enqueue(task, (1,), {})
         res2 = self.backend.enqueue(task, (1,), {})
@@ -60,7 +60,9 @@ class TestReproqBackend(unittest.TestCase):
         self.assertEqual(TaskRun.objects.count(), 1)
 
 class TestReproqManagement(unittest.TestCase):
-    def test_check_command(self):
+    @patch("subprocess.check_output")
+    def test_check_command(self, mock_version):
+        mock_version.return_value = b"reproq version v0.1.0"
         from django.core.management import call_command
         from io import StringIO
         out = StringIO()

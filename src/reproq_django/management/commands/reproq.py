@@ -96,6 +96,8 @@ class Command(BaseCommand):
                 self.stdout.write(self.style.SUCCESS("✅ Database schema present."))
             else:
                 self.stderr.write(self.style.ERROR("❌ Database schema missing (run migrate)."))
+        
+        self.stdout.write(self.style.SUCCESS("\n✨ Configuration looks good!"))
 
     def run_init(self, options):
         self.stdout.write(self.style.MIGRATE_HEADING("🚀 Bootstrapping Reproq..."))
