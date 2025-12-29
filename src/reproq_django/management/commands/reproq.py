@@ -121,15 +121,7 @@ class Command(BaseCommand):
         override_path = getattr(settings, "REPROQ_WORKER_BIN", None) or os.environ.get(
             "REPROQ_WORKER_BIN"
         )
-        if override_path:
-            target_path = os.path.abspath(os.path.expanduser(str(override_path)))
-            bin_dir = os.path.dirname(target_path)
-            os.makedirs(bin_dir, exist_ok=True)
-        else:
-            pkg_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-            bin_dir = os.path.join(pkg_dir, "bin")
-            os.makedirs(bin_dir, exist_ok=True)
-        
+
         system = platform.system().lower()
         arch = platform.machine().lower()
         if arch == "x86_64": arch = "amd64"
@@ -137,8 +129,13 @@ class Command(BaseCommand):
         
         ext = ".exe" if system == "windows" else ""
         bin_name = f"reproq-{system}-{arch}{ext}"
-        if not override_path:
+        if override_path:
+            target_path = os.path.abspath(os.path.expanduser(str(override_path)))
+            bin_dir = os.path.dirname(target_path)
+        else:
+            bin_dir = os.path.join(os.getcwd(), ".reproq", "bin")
             target_path = os.path.join(bin_dir, f"reproq{ext}")
+        os.makedirs(bin_dir, exist_ok=True)
         self.stdout.write(f"Target path: {target_path}")
 
         with tempfile.NamedTemporaryFile(delete=False) as tmp_file:
@@ -303,10 +300,18 @@ WantedBy=multi-user.target
         self.stdout.write("Run 'python manage.py reproq worker' to process them.")
 
     def get_worker_bin(self):
-        worker_bin = getattr(settings, "REPROQ_WORKER_BIN", None)
-        if worker_bin: return worker_bin
-        pkg_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        worker_bin = getattr(settings, "REPROQ_WORKER_BIN", None) or os.environ.get(
+            "REPROQ_WORKER_BIN"
+        )
+        if worker_bin:
+            return worker_bin
+
         ext = ".exe" if platform.system() == "Windows" else ""
+        project_bin = os.path.join(os.getcwd(), ".reproq", "bin", f"reproq{ext}")
+        if os.path.exists(project_bin):
+            return project_bin
+
+        pkg_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         candidate = os.path.join(pkg_dir, "bin", f"reproq{ext}")
         return candidate if os.path.exists(candidate) else "reproq"
 

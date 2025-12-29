@@ -153,6 +153,7 @@ The `reproq` command is your primary tool for managing the task system.
 | `python manage.py reproq beat` | Starts the Go scheduler for periodic tasks. |
 | `python manage.py reproq systemd` | Generates service files. Supports `--concurrency`. |
 | `python manage.py reproq check` | High-depth validation of binary, DB, and schema. |
+| `python manage.py reproq_health` | Health check for DB, workers, and queues. |
 
 ---
 
@@ -246,7 +247,7 @@ TASKS = {
     }
 }
 
-# Path to the Go binary (if not in PATH)
+# Path to the Go binary (if not in PATH). If unset, Reproq uses `./.reproq/bin/reproq`.
 REPROQ_WORKER_BIN = "/usr/local/bin/reproq"
 ```
 

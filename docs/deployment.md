@@ -53,6 +53,7 @@ The Go worker needs access to your database. It respects the following:
 - `WORKER_ID`: Unique name for the worker node (defaults to hostname).
 - `PYTHONPATH`: Ensure your Django project is importable.
 - `REPROQ_WORKER_BIN`: Optional explicit path to the worker binary. If set, `python manage.py reproq install` writes the binary to this path.
+  If unset, the default install target is `./.reproq/bin/reproq`.
 
 ## 3. Worker Concurrency
 
