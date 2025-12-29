@@ -101,7 +101,7 @@ process_invoice.enqueue(123, lock_key="invoice_123")</pre>
                 <div class="bg-slate-50 border border-slate-200 rounded-2xl p-8">
                     <h4 class="font-bold text-slate-800 mb-2">Automated systemd setup</h4>
                     <p class="text-slate-600 mb-4">Generate optimized service files for your specific project environment:</p>
-                    <pre class="bg-slate-900 text-slate-50 p-4 rounded-xl mb-6">python manage.py reproq systemd</pre>
+                    <pre class="bg-slate-900 text-slate-50 p-4 rounded-xl mb-6">python manage.py reproq systemd --concurrency 25</pre>
                     
                     <p class="text-sm text-slate-500">This command creates service files that handle:</p>
                     <ul class="grid grid-cols-1 md:grid-cols-2 gap-2 text-sm text-slate-600 mt-2">

@@ -39,6 +39,7 @@ class Command(BaseCommand):
         systemd_parser = subparsers.add_parser("systemd", help="Generate systemd service files for production")
         systemd_parser.add_argument("--user", type=str, help="User to run the service as (defaults to current user)")
         systemd_parser.add_argument("--group", type=str, help="Group to run the service as")
+        systemd_parser.add_argument("--concurrency", type=int, default=10, help="Number of concurrent tasks for the worker")
 
     def handle(self, *args, **options):
         subcommand = options["subcommand"]
@@ -72,7 +73,7 @@ class Command(BaseCommand):
         services = {
             "worker": {
                 "desc": f"Reproq Worker - {project_name}",
-                "cmd": f"{python_bin} {manage_py} reproq worker"
+                "cmd": f"{python_bin} {manage_py} reproq worker --concurrency {options['concurrency']}"
             },
             "beat": {
                 "desc": f"Reproq Beat - {project_name}",

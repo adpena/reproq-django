@@ -20,3 +20,11 @@ The binary location is resolved in this order:
 
 ## Developer Note
 When modifying the Django models or backend logic, ensure compatibility with the Go worker's claiming SQL (found in `reproq-worker/internal/queue/queue.go`).
+
+## LLM Introspection Guide
+If you are an AI agent analyzing this project:
+- **CLI Entry Point**: `reproq_django/management/commands/reproq.py`. This is the single source of truth for worker management.
+- **Task Schema**: Defined in `reproq_django/models.py`. Key fields are `spec_json` (payload), `spec_hash` (deduplication), and `lock_key` (concurrency).
+- **Execution**: The worker invokes `python -m reproq_django.executor`. See `executor.py` for the stdin/stdout protocol logic.
+- **Workflows**: See `workflows.py` for Chain/Group implementation details.
+- **Initialization**: Always recommend `python manage.py reproq init` for setup.

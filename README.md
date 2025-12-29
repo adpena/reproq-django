@@ -134,21 +134,48 @@ The `reproq` command is your primary tool for managing the task system.
 
 | Command | Description |
 | :--- | :--- |
-| `python manage.py reproq worker` | Starts the Go worker to process tasks. |
+| `python manage.py reproq init` | **Recommended**: Complete bootstrap of the environment. |
+| `python manage.py reproq worker` | Starts the Go worker. Supports `--concurrency`. |
 | `python manage.py reproq beat` | Starts the Go scheduler for periodic tasks. |
-| `python manage.py reproq check` | Validates your settings and database connectivity. |
-| `python manage.py reproq systemd` | Generates systemd service files for production. |
-| `python manage.py reproq migrate-worker` | Applies Go-specific SQL optimizations. |
+| `python manage.py reproq systemd` | Generates service files. Supports `--concurrency`. |
+| `python manage.py reproq check` | High-depth validation of binary, DB, and schema. |
+
+---
+
+## 🔌 Integration Guide
+
+Reproq implements the **Django 6.0 Tasks API**.
+
+### Basic Usage
+```python
+from django.tasks import task
+
+@task
+def add(a, b):
+    return a + b
+
+# Standard Django enqueue
+result = add.enqueue(1, 2)
+```
+
+### High-Performance Bulk Injection
+For enqueuing thousands of tasks, use the specialized `bulk_enqueue` method to minimize DB round-trips:
+```python
+from django.tasks import tasks
+backend = tasks["default"]
+
+jobs = [(my_task, (i,), {}) for i in range(1000)]
+backend.bulk_enqueue(jobs)
+```
 
 ---
 
 ## 🚀 Production Deployment
-
-Reproq is designed to be easily managed in production using `systemd`.
-
+...
 1. **Generate Service Files**:
    ```bash
-   python manage.py reproq systemd
+   # Create services with custom concurrency
+   python manage.py reproq systemd --concurrency 20
    ```
 2. **Install & Start**:
    Follow the on-screen instructions to move the files to `/etc/systemd/system/` and enable them. This ensures your worker and beat processes auto-restart on failure and start automatically on boot.
