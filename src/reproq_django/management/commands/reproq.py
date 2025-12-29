@@ -40,6 +40,15 @@ class Command(BaseCommand):
         # Init
         subparsers.add_parser("init", help="Bootstrap Reproq in the current project")
 
+        # Stats
+        subparsers.add_parser("stats", help="Show task execution statistics")
+
+        # Stress Test
+        stress_parser = subparsers.add_parser("stress-test", help="Enqueue a large number of tasks for benchmarking")
+        stress_parser.add_argument("--count", type=int, default=100, help="Number of tasks to enqueue")
+        stress_parser.add_argument("--sleep", type=float, default=0, help="Time each task should sleep")
+        stress_parser.add_argument("--bulk", action="store_true", help="Use bulk_enqueue")
+
         # systemd
         systemd_parser = subparsers.add_parser("systemd", help="Generate systemd service files")
         systemd_parser.add_argument("--user", type=str, help="User to run as")
@@ -53,6 +62,10 @@ class Command(BaseCommand):
             self.run_check()
         elif subcommand == "init":
             self.run_init(options)
+        elif subcommand == "stats":
+            self.run_stats()
+        elif subcommand == "stress-test":
+            self.run_stress_test(options)
         elif subcommand == "systemd":
             self.run_systemd(options)
         elif subcommand == "install":
@@ -215,6 +228,48 @@ WantedBy=multi-user.target
             pass
         except Exception as e:
             self.stderr.write(self.style.ERROR(f"Error running {cmd}: {e}"))
+
+    def run_stats(self):
+        from reproq_django.models import TaskRun, Worker
+        from django.db.models import Count
+        import json
+
+        self.stdout.write(self.style.MIGRATE_HEADING("📊 Reproq Statistics"))
+        
+        stats = TaskRun.objects.values("status").annotate(count=Count("result_id"))
+        self.stdout.write("\nTasks by Status:")
+        for s in stats:
+            color = self.style.SUCCESS if s["status"] == "SUCCESSFUL" else (self.style.ERROR if s["status"] == "FAILED" else self.style.WARNING)
+            self.stdout.write(f"  {s['status']:<12}: {color(str(s['count']))}")
+
+        workers = Worker.objects.all()
+        self.stdout.write(f"\nActive Workers: {len(workers)}")
+        for w in workers:
+            self.stdout.write(f"  - {w.worker_id} ({w.hostname}) | Queues: {w.queues} | Concurrency: {w.concurrency}")
+
+    def run_stress_test(self, options):
+        from reproq_django.tasks import debug_noop_task
+        from django.tasks import tasks
+        import time
+
+        count = options["count"]
+        sleep = options["sleep"]
+        bulk = options["bulk"]
+
+        self.stdout.write(self.style.MIGRATE_HEADING(f"🚀 Enqueueing {count} tasks (sleep={sleep}s, bulk={bulk})..."))
+        start = time.time()
+
+        if bulk:
+            backend = tasks["default"]
+            tasks_data = [(debug_noop_task, (), {"sleep_seconds": sleep}) for _ in range(count)]
+            backend.bulk_enqueue(tasks_data)
+        else:
+            for _ in range(count):
+                debug_noop_task.enqueue(sleep_seconds=sleep)
+
+        duration = time.time() - start
+        self.stdout.write(self.style.SUCCESS(f"✅ Enqueued {count} tasks in {duration:.2f}s ({count/duration:.1f} tasks/sec)"))
+        self.stdout.write("Run 'python manage.py reproq worker' to process them.")
 
     def get_worker_bin(self):
         worker_bin = getattr(settings, "REPROQ_WORKER_BIN", None)
