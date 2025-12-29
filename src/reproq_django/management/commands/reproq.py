@@ -5,7 +5,7 @@ import platform
 import shutil
 import urllib.request
 import tempfile
-from django.core.management.base import BaseCommand
+from django.core.management.base import BaseCommand, CommandError
 from django.conf import settings
 from django.db import connection
 
@@ -77,18 +77,24 @@ class Command(BaseCommand):
 
     def run_check(self):
         self.stdout.write("Checking Reproq configuration...")
-        worker_bin = self.get_worker_bin()
+        worker_bin, resolved_bin, exists = self._resolve_worker_bin()
         try:
             version = subprocess.check_output([worker_bin, "--version"]).decode().strip()
             self.stdout.write(self.style.SUCCESS(f"✅ Worker binary: {version}"))
         except Exception as e:
             self.stderr.write(self.style.ERROR(f"❌ Worker binary invalid: {e}"))
+            if resolved_bin:
+                self.stderr.write(self.style.ERROR(f"   Resolved path: {resolved_bin}"))
 
         dsn = self.get_dsn()
         if dsn:
-            self.stdout.write(self.style.SUCCESS("✅ Database DSN detected."))
+            source = "DATABASE_URL" if os.environ.get("DATABASE_URL") else "DATABASES"
+            self.stdout.write(self.style.SUCCESS(f"✅ Database DSN detected ({source})."))
         else:
             self.stderr.write(self.style.ERROR("❌ Database DSN not detected."))
+            self.stderr.write(
+                self.style.ERROR("   Set DATABASE_URL or configure DATABASES with USER/NAME.")
+            )
 
         with connection.cursor() as cursor:
             tables = connection.introspection.table_names(cursor)
@@ -133,6 +139,7 @@ class Command(BaseCommand):
         bin_name = f"reproq-{system}-{arch}{ext}"
         if not override_path:
             target_path = os.path.join(bin_dir, f"reproq{ext}")
+        self.stdout.write(f"Target path: {target_path}")
 
         with tempfile.NamedTemporaryFile(delete=False) as tmp_file:
             tmp_path = tmp_file.name
@@ -224,7 +231,19 @@ WantedBy=multi-user.target
 
     def run_worker_or_beat(self, cmd, options):
         dsn = self.get_dsn()
-        worker_bin = self.get_worker_bin()
+        worker_bin, resolved_bin, exists = self._resolve_worker_bin()
+        if not exists:
+            hint = (
+                "Run `python manage.py reproq install` or set REPROQ_WORKER_BIN "
+                "to the installed binary path."
+            )
+            raise CommandError(
+                f"Worker binary not found (resolved: {resolved_bin or worker_bin}). {hint}"
+            )
+        if not dsn:
+            raise CommandError(
+                "DATABASE_URL not set. Reproq worker requires a Postgres DSN."
+            )
         args = [worker_bin, cmd, "--dsn", dsn]
         if cmd == "worker":
             args.extend(["--concurrency", str(options["concurrency"])])
@@ -299,3 +318,12 @@ WantedBy=multi-user.target
         name = db_conf.get("NAME")
         if not user or not name: return None
         return f"postgres://{user}:{db_conf.get('PASSWORD', '')}@{db_conf.get('HOST', 'localhost')}:{db_conf.get('PORT', '5432')}/{name}"
+
+    def _resolve_worker_bin(self):
+        worker_bin = self.get_worker_bin()
+        if os.path.isabs(worker_bin):
+            resolved = worker_bin
+        else:
+            resolved = shutil.which(worker_bin)
+        exists = bool(resolved and os.path.exists(resolved))
+        return worker_bin, resolved, exists
