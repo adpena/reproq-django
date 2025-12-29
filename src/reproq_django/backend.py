@@ -1,23 +1,20 @@
 from __future__ import annotations
-
 import hashlib
 import json
 import uuid
 from datetime import datetime, timedelta
 from typing import Any
 
-from django.db import connection, transaction
-from django.utils import timezone
+from django.db import connection, transaction, IntegrityError
 from django.tasks.backends.base import BaseTaskBackend
-from django.tasks.exceptions import TaskResultDoesNotExist
+from django.utils import timezone
+from asgiref.sync import sync_to_async
+
+from .models import TaskRun
+from .proxy import TaskResultProxy
 
 def _canonical_json(obj: Any) -> str:
-    # Stable serialization to compute spec_hash.
     return json.dumps(obj, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
-
-def _make_result_id() -> str:
-    # Must be < 64 chars (Django Tasks constraint).
-    return uuid.uuid4().hex  # 32 chars
 
 def _normalize_run_after(run_after: Any) -> datetime | None:
     if run_after is None:
@@ -25,44 +22,31 @@ def _normalize_run_after(run_after: Any) -> datetime | None:
     if isinstance(run_after, timedelta):
         return timezone.now() + run_after
     if isinstance(run_after, datetime):
-        if run_after.tzinfo is None:
+        if timezone.is_naive(run_after):
             raise ValueError("run_after must be timezone-aware")
         return run_after
     raise TypeError("run_after must be datetime, timedelta, or None")
 
 class ReproqBackend(BaseTaskBackend):
-    """
-    Django 6.0 Tasks backend that stores enqueued tasks + results in Postgres table `task_runs`.
-    A separate Go worker service claims and executes runs.
-    """
-
     supports_defer = True
     supports_priority = True
     supports_get_result = True
-    supports_async_task = False  # set True only if you explicitly support coroutine tasks
+    supports_async_task = True
 
-    def enqueue(self, task, args, kwargs):
-        # Django validates JSON round-trip in Task.enqueue(); still validate task shape.
+    def enqueue(self, task, args, kwargs) -> TaskResultProxy:
         self.validate_task(task)
-
         run_after_dt = _normalize_run_after(task.run_after)
 
         spec = {
             "v": 1,
-            "task_path": f"{task.func.__module__}.{task.func.__name__}",
+            "task_path": task.module_path,
             "args": args,
             "kwargs": kwargs,
-            "queue_name": task.queue_name,
-            "priority": task.priority,
+            "takes_context": getattr(task, "takes_context", False),
+            "queue_name": task.queue_name or "default",
+            "priority": task.priority or 0,
             "run_after": run_after_dt.isoformat() if run_after_dt else None,
-            "django": {
-                # Optional: include settings module or project name
-                "settings_module": None,
-            },
             "exec": {
-                # Go worker decides how to run; keep placeholders for determinism.
-                "mode": "python_module",
-                "entrypoint": "myproject.task_executor",
                 "timeout_seconds": int(self.options.get("TIMEOUT_SECONDS", 900)),
                 "max_attempts": int(self.options.get("MAX_ATTEMPTS", 5)),
             },
@@ -74,56 +58,99 @@ class ReproqBackend(BaseTaskBackend):
 
         spec_str = _canonical_json(spec)
         spec_hash = hashlib.sha256(spec_str.encode("utf-8")).hexdigest()
-        result_id = _make_result_id()
+        dedup = self.options.get("DEDUP_ACTIVE", True)
+        
+        # Lock Key
+        lock_key = kwargs.pop("lock_key", getattr(task, "lock_key", None))
 
-        with transaction.atomic():
-            with connection.cursor() as cur:
-                cur.execute(
-                    """
-                    INSERT INTO task_runs (
-                      result_id, backend_alias, queue_name, priority, run_after,
-                      spec_json, spec_hash, status, enqueued_at, errors_json
-                    )
-                    VALUES (%s, %s, %s, %s, %s, %s::jsonb, %s, 'READY', now(), '[]'::jsonb)
-                    """,
-                    [result_id, task.backend, task.queue_name, task.priority, run_after_dt, spec_str, spec_hash],
-                )
+        # TTL / Expiry
+        expires_in = self.options.get("EXPIRES_IN")
+        expires_at = None
+        if expires_in:
+            expires_at = timezone.now() + expires_in
 
-        return task.get_result(result_id)
-
-    def get_result(self, result_id: str):
-        with connection.cursor() as cur:
-            cur.execute(
-                """
-                SELECT status, enqueued_at, started_at, last_attempted_at, finished_at,
-                       backend_alias, errors_json, return_json, attempts, worker_ids
-                FROM task_runs
-                WHERE result_id = %s
-                """,
-                [result_id],
+        def _try_insert():
+            run = TaskRun.objects.create(
+                backend_alias=self.alias,
+                queue_name=spec["queue_name"],
+                priority=spec["priority"],
+                run_after=run_after_dt,
+                spec_json=spec,
+                spec_hash=spec_hash,
+                status="READY",
+                errors_json=[],
+                max_attempts=spec["exec"]["max_attempts"],
+                timeout_seconds=spec["exec"]["timeout_seconds"],
+                expires_at=expires_at,
+                lock_key=lock_key
             )
-            row = cur.fetchone()
+            return run.result_id
 
-        if not row:
-            raise TaskResultDoesNotExist(result_id)
+        if not dedup:
+            return self.get_result(_try_insert())
 
-        (status, enq, started, last, finished,
-         backend_alias, errors_json, return_json, attempts, worker_ids) = row
+        try:
+            return self.get_result(_try_insert())
+        except IntegrityError:
+            # Conflict on spec_hash for active status (due to unique index in Go migrations)
+            # We try to find the existing one.
+            row = TaskRun.objects.filter(spec_hash=spec_hash, status__in=["READY", "RUNNING"]).first()
+            if row:
+                return self.get_result(row.result_id)
+            
+            # If no row found, maybe it just finished. Try inserting again.
+            try:
+                return self.get_result(_try_insert())
+            except IntegrityError:
+                raise RuntimeError(f"Failed to enqueue or find duplicate for spec_hash {spec_hash}")
 
-        # Django’s concrete TaskResult class may vary; this approach works if TaskResult
-        # can be instantiated. If not, we’ll replace with a small proxy later.
-        from django.tasks.results import TaskResult
+    def get_result(self, result_id: int | str) -> TaskResultProxy:
+        return TaskResultProxy(str(result_id), self)
 
-        return TaskResult(
-            id=result_id,
-            status=status,
-            enqueued_at=enq,
-            started_at=started,
-            last_attempted_at=last,
-            finished_at=finished,
-            backend=backend_alias,
-            errors=errors_json,
-            _return_value=return_json,
-            _attempts=attempts,
-            _worker_ids=worker_ids,
-        )
+    def bulk_enqueue(self, tasks_data: list[tuple[Task, tuple, dict]]) -> list[TaskResultProxy]:
+        """
+        Enqueue multiple tasks in a single database transaction and query.
+        """
+        runs = []
+        for task, args, kwargs in tasks_data:
+            run_after_dt = _normalize_run_after(kwargs.pop("run_after", task.run_after))
+            lock_key = kwargs.pop("lock_key", getattr(task, "lock_key", None))
+            
+            spec = {
+                "v": 1,
+                "task_path": task.module_path,
+                "args": args,
+                "kwargs": kwargs,
+                "takes_context": getattr(task, "takes_context", False),
+                "queue_name": task.queue_name or "default",
+                "priority": task.priority or 0,
+                "run_after": run_after_dt.isoformat() if run_after_dt else None,
+                "exec": {
+                    "timeout_seconds": int(self.options.get("TIMEOUT_SECONDS", 900)),
+                    "max_attempts": int(self.options.get("MAX_ATTEMPTS", 5)),
+                },
+            }
+            spec_str = _canonical_json(spec)
+            spec_hash = hashlib.sha256(spec_str.encode("utf-8")).hexdigest()
+
+            runs.append(TaskRun(
+                backend_alias=self.alias,
+                queue_name=spec["queue_name"],
+                priority=spec["priority"],
+                run_after=run_after_dt,
+                spec_json=spec,
+                spec_hash=spec_hash,
+                status="READY",
+                max_attempts=spec["exec"]["max_attempts"],
+                timeout_seconds=spec["exec"]["timeout_seconds"],
+                lock_key=lock_key
+            ))
+
+        created = TaskRun.objects.bulk_create(runs)
+        return [TaskResultProxy(str(run.result_id), self) for run in created]
+
+    async def aenqueue(self, task, args, kwargs) -> TaskResultProxy:
+        return await sync_to_async(self.enqueue)(task, args, kwargs)
+
+    async def aget_result(self, result_id: str) -> TaskResultProxy:
+        return TaskResultProxy(result_id, self)
