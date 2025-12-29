@@ -28,8 +28,11 @@
                 <a href="#quickstart" class="block px-3 py-2 text-sm font-medium rounded-md hover:bg-slate-100 text-slate-700">Quickstart</a>
                 <a href="#configuration" class="block px-3 py-2 text-sm font-medium rounded-md hover:bg-slate-100 text-slate-700">Configuration</a>
                 <div class="pt-4 pb-2 text-xs font-semibold text-slate-400 uppercase tracking-wider px-3">Advanced</div>
+                <a href="#architecture" class="block px-3 py-2 text-sm font-medium rounded-md hover:bg-slate-100 text-slate-700">Architecture</a>
                 <a href="#lock-key" class="block px-3 py-2 text-sm font-medium rounded-md hover:bg-slate-100 text-slate-700">Concurrency (Lock Key)</a>
                 <a href="#workflows" class="block px-3 py-2 text-sm font-medium rounded-md hover:bg-slate-100 text-slate-700">Workflows (Chains)</a>
+                <a href="#determinism" class="block px-3 py-2 text-sm font-medium rounded-md hover:bg-slate-100 text-slate-700">Determinism & Dedup</a>
+                <a href="#payloads" class="block px-3 py-2 text-sm font-medium rounded-md hover:bg-slate-100 text-slate-700">Large Payloads</a>
                 <a href="#periodic" class="block px-3 py-2 text-sm font-medium rounded-md hover:bg-slate-100 text-slate-700">Periodic Tasks</a>
                 <a href="#production" class="block px-3 py-2 text-sm font-medium rounded-md hover:bg-slate-100 text-slate-700">Production (systemd)</a>
                 <a href="https://github.com/adpena/reproq-django/blob/main/RENDER.md" class="block px-3 py-2 text-sm font-medium rounded-md hover:bg-slate-100 text-slate-700">Production (Render)</a>
@@ -76,6 +79,16 @@
 }</pre>
             </section>
 
+            <section id="architecture" class="mb-16 prose prose-slate max-w-none">
+                <h2 class="text-3xl font-bold mb-6">Architecture</h2>
+                <p>Reproq follows a "split-brain" architecture to maximize both developer productivity and runtime performance.</p>
+                <ul>
+                    <li><strong>Reproq Django (The Brain)</strong>: Responsible for task definition, enqueuing, and the monitoring UI.</li>
+                    <li><strong>Reproq Worker (The Muscle)</strong>: A standalone Go binary that polls PostgreSQL and executes tasks in isolated processes.</li>
+                    <li><strong>PostgreSQL (The Broker)</strong>: The single source of truth for task state and worker health.</li>
+                </ul>
+            </section>
+
             <section id="lock-key" class="mb-16 prose prose-slate max-w-none">
                 <h2 class="text-3xl font-bold mb-6">Concurrency Control</h2>
                 <p>Prevent multiple tasks from operating on the same resource simultaneously using <code>lock_key</code>.</p>
@@ -88,6 +101,35 @@ def process_invoice(invoice_id):
 
 # This ensures only one invoice_123 task runs at a time
 process_invoice.enqueue(123, lock_key="invoice_123")</pre>
+            </section>
+
+            <section id="workflows" class="mb-16 prose prose-slate max-w-none">
+                <h2 class="text-3xl font-bold mb-6">Workflows (Chains)</h2>
+                <p>Execute tasks in sequence using <code>chain</code>. Each task waits for the previous one to complete successfully.</p>
+                <pre>from reproq_django.workflows import chain
+
+chain(task_a, task_b, task_c).enqueue()</pre>
+            </section>
+
+            <section id="determinism" class="mb-16 prose prose-slate max-w-none">
+                <h2 class="text-3xl font-bold mb-6">Determinism & Deduplication</h2>
+                <p>Reproq features a powerful deterministic execution model based on <strong>Specification Hashing</strong>.</p>
+                <p>When you enqueue a task, Reproq generates a SHA256 hash of the task name, arguments, and queue. If <code>DEDUP_ACTIVE</code> is enabled, identical tasks that are already <code>READY</code> or <code>RUNNING</code> will be coalesced, preventing redundant work.</p>
+                <pre>TASKS = {
+    "default": {
+        "BACKEND": "reproq_django.backend.ReproqBackend",
+        "OPTIONS": { "DEDUP_ACTIVE": True }
+    }
+}</pre>
+            </section>
+
+            <section id="payloads" class="mb-16 prose prose-slate max-w-none">
+                <h2 class="text-3xl font-bold mb-6">Large Payloads</h2>
+                <p>While Reproq handles complex data types, it's best practice to pass IDs instead of full objects to keep the database and IPC communication lean.</p>
+                <ul>
+                    <li><strong>IDs over Objects</strong>: Pass <code>user_id</code> and fetch the user in the task.</li>
+                    <li><strong>1MB Output Limit</strong>: The Go worker captures up to 1MB of stdout from the task result. For larger results, use a database model or external storage.</li>
+                </ul>
             </section>
 
             <section id="periodic" class="mb-16 prose prose-slate max-w-none">

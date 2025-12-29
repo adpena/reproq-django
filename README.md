@@ -95,7 +95,21 @@ print(result.result) # "Email sent to 123"
 ```
 
 ### Periodic Tasks (Cron)
-Define periodic tasks in the Django Admin or via the `PeriodicTask` model...
+Manage recurring tasks directly from the Django Admin or using the `PeriodicTask` model.
+
+```python
+from reproq_django.models import PeriodicTask
+
+PeriodicTask.objects.create(
+    name="Clean old logs",
+    task_path="myapp.tasks.cleanup",
+    cron="0 0 * * *", # Daily at midnight
+    queue_name="maintenance"
+)
+```
+
+Ensure the `reproq beat` process is running to trigger these schedules. Only one instance of `beat` should be active per database.
+
 
 ---
 
@@ -171,7 +185,9 @@ backend.bulk_enqueue(jobs)
 ---
 
 ## 🚀 Production Deployment
-...
+
+Reproq is built for stability. We recommend using `systemd` to manage your worker processes.
+
 1. **Generate Service Files**:
    ```bash
    # Create services with custom concurrency
