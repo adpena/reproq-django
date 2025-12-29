@@ -15,7 +15,7 @@ python manage.py reproq install
 Example `render.yaml` build command:
 ```yaml
 buildCommand: |
-  uv sync --frozen
+  uv sync --upgrade
   uv run python manage.py reproq install  # <--- Fetch the Go binary
   uv run python manage.py collectstatic --noinput
 ```
@@ -29,7 +29,7 @@ Add this to your `render.yaml`:
   - type: worker
     name: reproq-worker
     runtime: python
-    buildCommand: uv sync --frozen && uv run python manage.py reproq install
+    buildCommand: uv sync --upgrade && uv run python manage.py reproq install
     startCommand: uv run python manage.py reproq worker
     envVars:
       - key: DATABASE_URL
@@ -45,7 +45,7 @@ If you use periodic tasks, you need exactly one instance of the `beat` process. 
   - type: worker
     name: reproq-beat
     runtime: python
-    buildCommand: uv sync --frozen && uv run python manage.py reproq install
+    buildCommand: uv sync --upgrade && uv run python manage.py reproq install
     startCommand: uv run python manage.py reproq beat
     envVars:
       - key: DATABASE_URL
