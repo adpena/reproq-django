@@ -2,6 +2,27 @@
 
 Reproq is designed for stability in production environments. Follow these guidelines for a robust setup.
 
+## 0. Deployment Options
+
+**Option A (Recommended): Separate worker + beat processes**
+- Run `python manage.py reproq worker` and `python manage.py reproq beat` as dedicated processes.
+- Use a supervisor (systemd, supervisor, or separate container/services) so they restart automatically.
+
+**Option B: Single-service (web + worker + beat)**
+- Run the worker and beat in the same service as your web process.
+- Simpler to deploy, but less reliable: background processes are not supervised and can die silently.
+
+Example single-service start command:
+```bash
+/bin/bash -lc "
+python manage.py reproq worker --concurrency 5 &
+python manage.py reproq beat --interval 30s &
+exec gunicorn myproj.wsgi:application --workers=1 --timeout=120
+"
+```
+
+Only one `beat` instance should run per database.
+
 ## 1. Systemd Configuration (Recommended)
 
 Reproq provides an automated way to generate systemd service files. This is the preferred method for Linux servers.
