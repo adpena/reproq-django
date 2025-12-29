@@ -62,8 +62,8 @@ python manage.py reproq install
 
 ### 4. Run Migrations
 ```bash
-python manage.py migrate
 python manage.py reproq migrate-worker
+python manage.py migrate
 ```
 If you previously applied the legacy Reproq Worker SQL migrations, run
 `migrations/000013_convert_worker_arrays_to_jsonb.up.sql` from the
@@ -95,6 +95,16 @@ result = send_welcome_email.enqueue(123)
 # Wait for result (optional)
 result.wait(timeout=5)
 print(result.result) # "Email sent to 123"
+```
+
+### Forward-Compatible Task Signatures
+When rolling out new task arguments, consider accepting `**kwargs` so older
+workers can safely ignore unknown fields during a deploy:
+
+```python
+@task
+def send_welcome_email(user_id, **_kwargs):
+    return f"Email sent to {user_id}"
 ```
 
 ### Periodic Tasks (Cron)

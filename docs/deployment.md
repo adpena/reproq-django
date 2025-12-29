@@ -94,3 +94,7 @@ python manage.py migrate --noinput
 ```
 
 This ensures Postgres extensions are enabled before Django applies its migrations.
+
+After migrations complete, enqueue any deploy-time tasks (such as deploy
+notifications or periodic task seeds). Enqueuing before schema setup can
+fail silently or create partial task records.

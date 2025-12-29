@@ -39,5 +39,13 @@ When `DEDUP_ACTIVE` is True, Reproq will check if a task with the **exact same s
 
 If you want to bypass deduplication for a specific call, you can change a non-functional argument (like a timestamp) or use a unique `lock_key`.
 
+Example with a deploy identifier:
+```python
+import uuid
+
+deploy_id = str(uuid.uuid4())
+notify_deploy_success.enqueue(deploy_id=deploy_id)
+```
+
 ### Migration Note
 If you previously applied legacy reproq-worker SQL migrations that created array columns for worker metadata, apply `migrations/000013_convert_worker_arrays_to_jsonb.up.sql` from the reproq-worker repo to keep schema expectations aligned with deduplication and worker tracking.
