@@ -79,8 +79,12 @@ class TestReproqManagement(unittest.TestCase):
         self.assertIn("Configuration looks good", out.getvalue())
 
     @patch("subprocess.run")
-    def test_worker_command_spawns_process(self, mock_run):
+    @patch("reproq_django.management.commands.reproq.Command._resolve_worker_bin")
+    @patch("reproq_django.management.commands.reproq.Command.get_dsn")
+    def test_worker_command_spawns_process(self, mock_get_dsn, mock_resolve_bin, mock_run):
         from django.core.management import call_command
+        mock_get_dsn.return_value = "postgres://user:pass@localhost:5432/db"
+        mock_resolve_bin.return_value = ("reproq", "/usr/local/bin/reproq", True)
         # We don't actually want to run it, just see if it calls subprocess
         with patch("sys.exit"): # avoid exit on keyboard interrupt
             try:
