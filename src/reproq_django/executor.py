@@ -80,6 +80,13 @@ def execute():
             exit_code=1,
         )
 
+    if hasattr(callable_task, "func"):
+        real_callable = callable_task.func
+    elif hasattr(callable_task, "run"):
+        real_callable = callable_task.run
+    else:
+        real_callable = callable_task
+
     # Context for task
     context = {
         "result_id": args.result_id,
@@ -113,9 +120,9 @@ def execute():
         stdout_capture = io.StringIO()
         with contextlib.redirect_stdout(stdout_capture):
             if spec.get("takes_context") or getattr(callable_task, "takes_context", False):
-                result_val = callable_task(context, *task_args, **task_kwargs)
+                result_val = real_callable(context, *task_args, **task_kwargs)
             else:
-                result_val = callable_task(*task_args, **task_kwargs)
+                result_val = real_callable(*task_args, **task_kwargs)
 
             # Support for async tasks
             if inspect.iscoroutine(result_val):

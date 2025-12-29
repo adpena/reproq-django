@@ -295,8 +295,8 @@ WantedBy=multi-user.target
 
     def run_stress_test(self, options):
         from reproq_django.tasks import debug_noop_task
-        from django.tasks import tasks
         import time
+        import django.tasks as django_tasks
 
         count = options["count"]
         sleep = options["sleep"]
@@ -305,11 +305,44 @@ WantedBy=multi-user.target
         self.stdout.write(self.style.MIGRATE_HEADING(f"🚀 Enqueueing {count} tasks (sleep={sleep}s, bulk={bulk})..."))
         start = time.time()
 
+        def _resolve_backend():
+            if hasattr(django_tasks, "tasks"):
+                try:
+                    return django_tasks.tasks["default"]
+                except Exception:
+                    pass
+            if hasattr(django_tasks, "get_task_backend"):
+                try:
+                    return django_tasks.get_task_backend("default")
+                except Exception:
+                    pass
+            if hasattr(debug_noop_task, "get_backend"):
+                try:
+                    return debug_noop_task.get_backend()
+                except Exception:
+                    pass
+            backend = getattr(debug_noop_task, "backend", None)
+            if backend and not isinstance(backend, str):
+                return backend
+            return None
+
         if bulk:
-            backend = tasks["default"]
-            tasks_data = [(debug_noop_task, (), {"sleep_seconds": sleep}) for _ in range(count)]
-            backend.bulk_enqueue(tasks_data)
-        else:
+            backend = _resolve_backend()
+            if backend is None:
+                self.stderr.write(
+                    self.style.WARNING(
+                        "Bulk enqueue unavailable; falling back to per-task enqueue."
+                    )
+                )
+                bulk = False
+            else:
+                tasks_data = [
+                    (debug_noop_task, (), {"sleep_seconds": sleep})
+                    for _ in range(count)
+                ]
+                backend.bulk_enqueue(tasks_data)
+
+        if not bulk:
             for _ in range(count):
                 debug_noop_task.enqueue(sleep_seconds=sleep)
 
