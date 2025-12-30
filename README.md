@@ -293,6 +293,15 @@ The `python manage.py reproq` command is your Swiss Army knife.
 
 ---
 
+## ⚖️ Scaling: Workers vs Concurrency
+
+- **Increase concurrency** (`--concurrency`): more goroutines in a single worker process; best for I/O-heavy tasks with minimal overhead.
+- **Run multiple workers**: separate processes/hosts; best for CPU-heavy workloads and fault isolation.
+
+Rule of thumb: start with 1-2 workers per host and tune `--concurrency` to available CPU cores and workload type.
+
+---
+
 ## 🔍 Admin Dashboard
 
 Reproq integrates deeply with the Django Admin.
