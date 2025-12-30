@@ -1,4 +1,3 @@
-import hashlib
 import json
 import uuid
 from django.contrib import admin, messages
@@ -10,6 +9,7 @@ from datetime import timedelta
 from django.urls import path, reverse
 from django.http import HttpResponseRedirect
 from .models import TaskRun, Worker, PeriodicTask, RateLimit, WorkflowRun
+from .serialization import spec_hash_for
 
 def format_json(field_data):
     if not field_data:
@@ -236,9 +236,14 @@ class TaskRunAdmin(admin.ModelAdmin):
 
     @admin.action(description="Cancel selected tasks")
     def cancel_tasks(self, request, queryset):
-        updated = queryset.filter(status__in=["READY", "RUNNING"]).update(cancel_requested=True)
-        queryset.filter(status="READY").update(status="CANCELLED")
-        self.message_user(request, f"Requested cancellation for {updated} tasks.", messages.SUCCESS)
+        now = timezone.now()
+        running = queryset.filter(status="RUNNING").update(cancel_requested=True, updated_at=now)
+        ready = queryset.filter(status="READY").update(status="CANCELLED", updated_at=now)
+        self.message_user(
+            request,
+            f"Requested cancellation for {running} running task(s); cancelled {ready} ready task(s).",
+            messages.SUCCESS,
+        )
 
     @admin.action(description="Delete selected SUCCESSFUL tasks")
     def delete_successful_tasks(self, request, queryset):
@@ -283,8 +288,7 @@ class TaskRunAdmin(admin.ModelAdmin):
                 "reclaim_test_id": str(uuid.uuid4()),
             },
         }
-        spec_str = json.dumps(spec, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
-        spec_hash = hashlib.sha256(spec_str.encode("utf-8")).hexdigest()
+        spec_hash = spec_hash_for(spec)
         return TaskRun.objects.create(
             backend_alias="default",
             queue_name=spec["queue_name"],

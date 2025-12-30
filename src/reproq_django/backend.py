@@ -1,6 +1,4 @@
 from __future__ import annotations
-import hashlib
-import json
 import uuid
 from datetime import datetime, timedelta
 from typing import Any
@@ -12,9 +10,7 @@ from asgiref.sync import sync_to_async
 
 from .models import TaskRun
 from .proxy import TaskResultProxy
-
-def _canonical_json(obj: Any) -> str:
-    return json.dumps(obj, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+from .serialization import normalize_json, spec_hash_for
 
 def _normalize_run_after(run_after: Any) -> datetime | None:
     if run_after is None:
@@ -37,6 +33,12 @@ class ReproqBackend(BaseTaskBackend):
         self.validate_task(task)
         run_after_dt = _normalize_run_after(kwargs.pop("run_after", task.run_after))
 
+        # Lock Key
+        lock_key = kwargs.pop("lock_key", getattr(task, "lock_key", None))
+        priority = kwargs.pop("priority", task.priority)
+        if priority is None:
+            priority = 0
+
         spec = {
             "v": 1,
             "task_path": task.module_path,
@@ -44,11 +46,12 @@ class ReproqBackend(BaseTaskBackend):
             "kwargs": kwargs,
             "takes_context": getattr(task, "takes_context", False),
             "queue_name": task.queue_name or "default",
-            "priority": task.priority or 0,
+            "priority": priority,
+            "lock_key": lock_key,
             "run_after": run_after_dt.isoformat() if run_after_dt else None,
             "exec": {
                 "timeout_seconds": int(self.options.get("TIMEOUT_SECONDS", 900)),
-                "max_attempts": int(self.options.get("MAX_ATTEMPTS", 5)),
+                "max_attempts": int(self.options.get("MAX_ATTEMPTS", 3)),
             },
             "provenance": {
                 "code_ref": self.options.get("CODE_REF"),
@@ -56,12 +59,9 @@ class ReproqBackend(BaseTaskBackend):
             },
         }
 
-        spec_str = _canonical_json(spec)
-        spec_hash = hashlib.sha256(spec_str.encode("utf-8")).hexdigest()
+        spec_normalized = normalize_json(spec)
+        spec_hash = spec_hash_for(spec_normalized)
         dedup = self.options.get("DEDUP_ACTIVE", True)
-        
-        # Lock Key
-        lock_key = kwargs.pop("lock_key", getattr(task, "lock_key", None))
 
         # TTL / Expiry
         expires_in = self.options.get("EXPIRES_IN")
@@ -73,9 +73,9 @@ class ReproqBackend(BaseTaskBackend):
             run = TaskRun.objects.create(
                 backend_alias=self.alias,
                 queue_name=spec["queue_name"],
-                priority=spec["priority"],
+                priority=priority,
                 run_after=run_after_dt,
-                spec_json=spec,
+                spec_json=spec_normalized,
                 spec_hash=spec_hash,
                 status="READY",
                 errors_json=[],
@@ -117,43 +117,142 @@ class ReproqBackend(BaseTaskBackend):
         """
         Enqueue multiple tasks in a single database transaction and query.
         """
-        runs = []
+        if not tasks_data:
+            return []
+
+        dedup = self.options.get("DEDUP_ACTIVE", True)
+        expires_in = self.options.get("EXPIRES_IN")
+        expires_at = None
+        if expires_in:
+            expires_at = timezone.now() + expires_in
+        entries = []
+        spec_hashes = set()
+
         for task, args, kwargs in tasks_data:
-            run_after_dt = _normalize_run_after(kwargs.pop("run_after", task.run_after))
-            lock_key = kwargs.pop("lock_key", getattr(task, "lock_key", None))
-            
+            self.validate_task(task)
+            safe_kwargs = dict(kwargs)
+            run_after_dt = _normalize_run_after(
+                safe_kwargs.pop("run_after", task.run_after)
+            )
+            lock_key = safe_kwargs.pop("lock_key", getattr(task, "lock_key", None))
+            priority = safe_kwargs.pop("priority", task.priority)
+            if priority is None:
+                priority = 0
+
             spec = {
                 "v": 1,
                 "task_path": task.module_path,
                 "args": args,
-                "kwargs": kwargs,
+                "kwargs": safe_kwargs,
                 "takes_context": getattr(task, "takes_context", False),
                 "queue_name": task.queue_name or "default",
-                "priority": task.priority or 0,
+                "priority": priority,
+                "lock_key": lock_key,
                 "run_after": run_after_dt.isoformat() if run_after_dt else None,
                 "exec": {
                     "timeout_seconds": int(self.options.get("TIMEOUT_SECONDS", 900)),
-                    "max_attempts": int(self.options.get("MAX_ATTEMPTS", 5)),
+                    "max_attempts": int(self.options.get("MAX_ATTEMPTS", 3)),
+                },
+                "provenance": {
+                    "code_ref": self.options.get("CODE_REF"),
+                    "pip_lock_hash": self.options.get("PIP_LOCK_HASH"),
                 },
             }
-            spec_str = _canonical_json(spec)
-            spec_hash = hashlib.sha256(spec_str.encode("utf-8")).hexdigest()
 
-            runs.append(TaskRun(
-                backend_alias=self.alias,
-                queue_name=spec["queue_name"],
-                priority=spec["priority"],
-                run_after=run_after_dt,
-                spec_json=spec,
-                spec_hash=spec_hash,
-                status="READY",
-                max_attempts=spec["exec"]["max_attempts"],
-                timeout_seconds=spec["exec"]["timeout_seconds"],
-                lock_key=lock_key
-            ))
+            spec_normalized = normalize_json(spec)
+            spec_hash = spec_hash_for(spec_normalized)
+            entries.append(
+                {
+                    "spec": spec_normalized,
+                    "spec_hash": spec_hash,
+                    "run_after_dt": run_after_dt,
+                    "lock_key": lock_key,
+                    "priority": priority,
+                    "expires_at": expires_at,
+                }
+            )
+            spec_hashes.add(spec_hash)
 
-        created = TaskRun.objects.bulk_create(runs)
-        return [TaskResultProxy(str(run.result_id), self) for run in created]
+        if not dedup:
+            runs = [
+                TaskRun(
+                    backend_alias=self.alias,
+                    queue_name=entry["spec"]["queue_name"],
+                    priority=entry["priority"],
+                    run_after=entry["run_after_dt"],
+                    spec_json=entry["spec"],
+                    spec_hash=entry["spec_hash"],
+                    status="READY",
+                    max_attempts=entry["spec"]["exec"]["max_attempts"],
+                    timeout_seconds=entry["spec"]["exec"]["timeout_seconds"],
+                    lock_key=entry["lock_key"],
+                    expires_at=entry["expires_at"],
+                )
+                for entry in entries
+            ]
+            created = TaskRun.objects.bulk_create(runs)
+            return [TaskResultProxy(str(run.result_id), self) for run in created]
+
+        existing = TaskRun.objects.filter(
+            spec_hash__in=spec_hashes, status__in=["READY", "RUNNING"]
+        ).values_list("spec_hash", "result_id")
+        result_ids = {spec_hash: result_id for spec_hash, result_id in existing}
+
+        runs = []
+        seen = set(result_ids.keys())
+        for entry in entries:
+            spec_hash = entry["spec_hash"]
+            if spec_hash in seen:
+                continue
+            runs.append(
+                TaskRun(
+                    backend_alias=self.alias,
+                    queue_name=entry["spec"]["queue_name"],
+                    priority=entry["priority"],
+                    run_after=entry["run_after_dt"],
+                    spec_json=entry["spec"],
+                    spec_hash=spec_hash,
+                    status="READY",
+                    max_attempts=entry["spec"]["exec"]["max_attempts"],
+                    timeout_seconds=entry["spec"]["exec"]["timeout_seconds"],
+                    lock_key=entry["lock_key"],
+                    expires_at=entry["expires_at"],
+                )
+            )
+            seen.add(spec_hash)
+
+        if runs:
+            TaskRun.objects.bulk_create(runs, ignore_conflicts=True)
+            created = TaskRun.objects.filter(
+                spec_hash__in=[run.spec_hash for run in runs],
+                status__in=["READY", "RUNNING"],
+            ).values_list("spec_hash", "result_id")
+            for spec_hash, result_id in created:
+                result_ids[spec_hash] = result_id
+
+        results = []
+        for entry in entries:
+            spec_hash = entry["spec_hash"]
+            result_id = result_ids.get(spec_hash)
+            if result_id is None:
+                run = TaskRun.objects.create(
+                    backend_alias=self.alias,
+                    queue_name=entry["spec"]["queue_name"],
+                    priority=entry["priority"],
+                    run_after=entry["run_after_dt"],
+                    spec_json=entry["spec"],
+                    spec_hash=spec_hash,
+                    status="READY",
+                    max_attempts=entry["spec"]["exec"]["max_attempts"],
+                    timeout_seconds=entry["spec"]["exec"]["timeout_seconds"],
+                    lock_key=entry["lock_key"],
+                    expires_at=entry["expires_at"],
+                )
+                result_id = run.result_id
+                result_ids[spec_hash] = result_id
+            results.append(TaskResultProxy(str(result_id), self))
+
+        return results
 
     async def aenqueue(self, task, args, kwargs) -> TaskResultProxy:
         return await sync_to_async(self.enqueue, thread_sensitive=True)(

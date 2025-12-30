@@ -10,6 +10,7 @@ When you enqueue a task, Reproq generates a SHA256 hash of the "specification":
 - Keyword arguments (`kwargs`)
 - Queue name
 - Priority
+- Lock key (if provided)
 - Run-after timestamp
 - Execution settings (timeout, max attempts)
 - Provenance metadata (when configured)
@@ -51,4 +52,4 @@ notify_deploy_success.enqueue(deploy_id=deploy_id)
 ```
 
 ### Note on `lock_key`
-`lock_key` is stored separately on `task_runs` and is not part of the `spec_hash`. Tasks that differ only by `lock_key` will still deduplicate when `DEDUP_ACTIVE` is enabled.
+`lock_key` is included in the canonical spec hash. Tasks that differ only by `lock_key` will **not** deduplicate when `DEDUP_ACTIVE` is enabled.

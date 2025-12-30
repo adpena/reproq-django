@@ -7,6 +7,7 @@ class TaskRunStatus:
     WAITING = "WAITING"
     SUCCESSFUL = "SUCCESSFUL"
     FAILED = "FAILED"
+    CANCELLED = "CANCELLED"
 
 class TaskRun(models.Model):
     result_id = models.BigAutoField(primary_key=True)

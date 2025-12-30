@@ -64,6 +64,11 @@ If you use periodic tasks, you need exactly one instance of the `beat` process. 
 Ensure the following variables are set in your Render environment:
 - `DATABASE_URL`: Required for the Go worker to connect to PostgreSQL.
 - `REPROQ_WORKER_BIN`: (Optional) Defaults to `src/reproq_django/bin/reproq`.
+- `ALLOWED_TASK_MODULES`: (Optional) Allow-list for task module prefixes. If unset, `python manage.py reproq worker` auto-configures it from discovered task modules.
+- `REPROQ_LOGS_DIR`: (Optional) Directory to persist worker stdout/stderr logs (updates `task_runs.logs_uri`).
+- `METRICS_TLS_CERT`: (Optional) TLS certificate path for health/metrics.
+- `METRICS_TLS_KEY`: (Optional) TLS private key path for health/metrics.
+- `METRICS_TLS_CLIENT_CA`: (Optional) Client CA bundle to require mTLS for health/metrics.
 
 ## 5. Memory Considerations
 Reproq Worker is extremely light. It typically uses less than 20MB of RAM, making it perfect for Render's **Free Tier** or **Starter** plans.

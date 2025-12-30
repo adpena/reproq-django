@@ -38,11 +38,15 @@ class TaskResultProxy:
 
     @property
     def status(self) -> TaskResultStatus:
+        raw = self.data.status
         try:
-            return TaskResultStatus(self.data.status)
+            return TaskResultStatus(raw)
         except ValueError as exc:
+            mapped = _map_status(raw)
+            if mapped is not None:
+                return mapped
             raise RuntimeError(
-                f"Task {self.id} has non-standard status {self.data.status!r}. "
+                f"Task {self.id} has non-standard status {raw!r}. "
                 "Use raw_status to inspect it."
             ) from exc
 
@@ -73,11 +77,18 @@ class TaskResultProxy:
             raise RuntimeError(f"Task {self.id} has status {self.status}, result not available.")
         return self.data.return_json
 
+    def _terminal_statuses(self) -> set[TaskResultStatus]:
+        statuses = {TaskResultStatus.SUCCESSFUL, TaskResultStatus.FAILED}
+        if "CANCELLED" in TaskResultStatus.__members__:
+            statuses.add(TaskResultStatus.CANCELLED)
+        return statuses
+
     def wait(self, timeout: float = None, poll_interval: float = 0.5) -> TaskResultProxy:
         start_time = time.time()
+        terminal_statuses = self._terminal_statuses()
         while True:
             self.refresh()
-            if self.status in (TaskResultStatus.SUCCESSFUL, TaskResultStatus.FAILED):
+            if self.status in terminal_statuses:
                 return self
             if timeout and (time.time() - start_time) > timeout:
                 raise TimeoutError(f"Timed out waiting for task {self.id}")
@@ -85,9 +96,10 @@ class TaskResultProxy:
 
     async def await_result(self, timeout: float = None, poll_interval: float = 0.5) -> TaskResultProxy:
         start_time = time.time()
+        terminal_statuses = self._terminal_statuses()
         while True:
             await self.arefresh()
-            if self.status in (TaskResultStatus.SUCCESSFUL, TaskResultStatus.FAILED):
+            if self.status in terminal_statuses:
                 return self
             if timeout and (time.time() - start_time) > timeout:
                 raise TimeoutError(f"Timed out waiting for task {self.id}")
@@ -95,3 +107,11 @@ class TaskResultProxy:
 
     def __repr__(self):
         return f"<TaskResultProxy id={self.id} status={self._data.status if self._data else 'UNKNOWN'}>"
+
+
+def _map_status(raw_status: str) -> TaskResultStatus | None:
+    if raw_status in ("READY", "WAITING") and "PENDING" in TaskResultStatus.__members__:
+        return TaskResultStatus.PENDING
+    if raw_status == "CANCELLED" and "CANCELLED" in TaskResultStatus.__members__:
+        return TaskResultStatus.CANCELLED
+    return None

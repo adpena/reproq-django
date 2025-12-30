@@ -3,7 +3,9 @@ import sys
 import os
 import json
 import subprocess
+import uuid
 from datetime import datetime, timezone, timedelta
+from decimal import Decimal
 from unittest.mock import MagicMock, patch
 
 # Ensure src is in path
@@ -38,6 +40,7 @@ class TestReproqBackend(unittest.TestCase):
     def setUp(self):
         from django.core.management import call_command
         call_command('migrate', verbosity=0)
+        TaskRun.objects.all().delete()
         self.backend = ReproqBackend(
             alias="default",
             params={"QUEUES": ["default", "test-queue", "q"]},
@@ -81,6 +84,77 @@ class TestReproqBackend(unittest.TestCase):
         self.assertEqual(run.spec_json["kwargs"], {"debug": True})
         self.assertIsNotNone(run.run_after)
         self.assertGreater(run.run_after, dj_timezone.now() + timedelta(minutes=4))
+
+    def test_priority_override(self):
+        my_func.__module__ = "test_module"
+        task = Task(func=my_func, priority=0, queue_name="q", backend="default", run_after=None)
+
+        result = self.backend.enqueue(task, (), {"priority": 42})
+        run = TaskRun.objects.get(result_id=result.id)
+
+        self.assertEqual(run.priority, 42)
+        self.assertEqual(run.spec_json["priority"], 42)
+        self.assertNotIn("priority", run.spec_json["kwargs"])
+
+    def test_lock_key_changes_spec_hash(self):
+        my_func.__module__ = "test_module"
+        task = Task(func=my_func, priority=0, queue_name="q", backend="default", run_after=None)
+
+        res1 = self.backend.enqueue(task, (), {"lock_key": "alpha"})
+        res2 = self.backend.enqueue(task, (), {"lock_key": "beta"})
+
+        self.assertNotEqual(res1.id, res2.id)
+        self.assertEqual(TaskRun.objects.count(), 2)
+
+    def test_spec_hash_handles_decimal_and_uuid(self):
+        my_func.__module__ = "test_module"
+        task = Task(func=my_func, priority=0, queue_name="q", backend="default", run_after=None)
+        token = uuid.uuid4()
+
+        result = self.backend.enqueue(
+            task, (), {"amount": Decimal("1.23"), "token": token}
+        )
+        run = TaskRun.objects.get(result_id=result.id)
+
+        self.assertEqual(len(run.spec_hash), 64)
+
+    def test_default_max_attempts(self):
+        my_func.__module__ = "test_module"
+        task = Task(func=my_func, priority=0, queue_name="q", backend="default", run_after=None)
+
+        result = self.backend.enqueue(task, (), {})
+        run = TaskRun.objects.get(result_id=result.id)
+
+        self.assertEqual(run.max_attempts, 3)
+        self.assertEqual(run.spec_json["exec"]["max_attempts"], 3)
+
+    def test_bulk_enqueue_dedupes(self):
+        my_func.__module__ = "test_module"
+        task = Task(func=my_func, priority=0, queue_name="q", backend="default", run_after=None)
+
+        results = self.backend.bulk_enqueue(
+            [
+                (task, (1,), {"debug": True}),
+                (task, (1,), {"debug": True}),
+            ]
+        )
+
+        self.assertEqual(results[0].id, results[1].id)
+        self.assertEqual(TaskRun.objects.count(), 1)
+
+    def test_bulk_enqueue_applies_expires_in(self):
+        my_func.__module__ = "test_module"
+        task = Task(func=my_func, priority=0, queue_name="q", backend="default", run_after=None)
+
+        if self.backend.options is None:
+            self.backend.options = {}
+        self.backend.options["EXPIRES_IN"] = timedelta(minutes=5)
+
+        results = self.backend.bulk_enqueue([(task, (), {})])
+        run = TaskRun.objects.get(result_id=results[0].id)
+
+        self.assertIsNotNone(run.expires_at)
+        self.assertGreater(run.expires_at, dj_timezone.now())
 
 class TestReproqManagement(unittest.TestCase):
     @patch("subprocess.check_output")
@@ -130,6 +204,52 @@ class TestReproqModels(unittest.TestCase):
             queues=["default"]
         )
         self.assertEqual(w.worker_id, "w1")
+
+class TestTaskResultProxyStatusMapping(unittest.TestCase):
+    def setUp(self):
+        from django.core.management import call_command
+        call_command('migrate', verbosity=0)
+        TaskRun.objects.all().delete()
+        self.backend = ReproqBackend(
+            alias="default",
+            params={"QUEUES": ["default"]},
+        )
+
+    def test_ready_maps_to_pending_when_available(self):
+        run = TaskRun.objects.create(
+            spec_json={},
+            spec_hash="ready" + "0" * 59,
+            status="READY",
+        )
+        proxy = TaskResultProxy(str(run.result_id), self.backend)
+        if "PENDING" in TaskResultStatus.__members__:
+            self.assertEqual(proxy.status, TaskResultStatus.PENDING)
+        else:
+            self.assertEqual(proxy.raw_status, "READY")
+
+    def test_cancelled_maps_when_available(self):
+        run = TaskRun.objects.create(
+            spec_json={},
+            spec_hash="cancel" + "0" * 58,
+            status="CANCELLED",
+        )
+        proxy = TaskResultProxy(str(run.result_id), self.backend)
+        if "CANCELLED" in TaskResultStatus.__members__:
+            self.assertEqual(proxy.status, TaskResultStatus.CANCELLED)
+        else:
+            self.assertEqual(proxy.raw_status, "CANCELLED")
+
+    def test_wait_returns_on_cancelled(self):
+        run = TaskRun.objects.create(
+            spec_json={},
+            spec_hash="cancelwait" + "0" * 54,
+            status="CANCELLED",
+        )
+        proxy = TaskResultProxy(str(run.result_id), self.backend)
+        if "CANCELLED" in TaskResultStatus.__members__:
+            self.assertIs(proxy.wait(timeout=0.1, poll_interval=0), proxy)
+        else:
+            self.assertEqual(proxy.raw_status, "CANCELLED")
 
 if __name__ == "__main__":
     unittest.main()

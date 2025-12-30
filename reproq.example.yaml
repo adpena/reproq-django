@@ -1,0 +1,55 @@
+# Reproq configuration (YAML)
+# Precedence: defaults < config file < env vars < CLI flags.
+
+# Global DSN used by worker and beat unless overridden below.
+dsn: "postgres://user:pass@localhost:5432/reproq?sslmode=disable"
+
+worker:
+  # Optional DSN override for the worker.
+  dsn: ""
+  worker_id: "worker-1"
+  queues:
+    - default
+    - high
+  allowed_task_modules:
+    - "myapp.tasks."
+    - "tasks."
+  # Use ["*"] to disable task module validation (dev only).
+  concurrency: 10
+  poll_min_backoff: "100ms"
+  poll_max_backoff: "5s"
+  lease_seconds: 300
+  heartbeat_seconds: 60
+  reclaim_interval_seconds: 60
+  python_bin: "python3"
+  executor_module: "reproq_django.executor"
+  payload_mode: "stdin" # stdin|file|inline
+  max_payload_bytes: 1048576
+  max_stdout_bytes: 1048576
+  max_stderr_bytes: 1048576
+  logs_dir: "" # Empty disables persisted logs.
+  exec_timeout: "1h"
+  max_attempts_default: 3
+  shutdown_timeout: "30s"
+  health_addr: ":8080" # Legacy (metrics uses metrics.addr/port)
+  priority_aging_factor: 60
+
+beat:
+  # Optional DSN override for beat.
+  dsn: ""
+  interval: "30s"
+
+metrics:
+  # Set either addr or port. addr overrides port.
+  addr: "127.0.0.1:9090"
+  port: 0
+  auth_token: ""
+  allow_cidrs:
+    - "127.0.0.1/32"
+  # Optional TLS settings (requires tls_cert + tls_key).
+  tls_cert: ""
+  tls_key: ""
+  tls_client_ca: "" # Optional mTLS client CA bundle.
+  auth_limit: 30
+  auth_window: "1m"
+  auth_max_entries: 1000

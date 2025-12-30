@@ -64,6 +64,19 @@ The Go worker needs access to your database. It respects the following:
 - `PYTHONPATH`: Ensure your Django project is importable.
 - `REPROQ_WORKER_BIN`: Optional explicit path to the worker binary. If set, `python manage.py reproq install` writes the binary to this path.
   If unset, the default install target is `./.reproq/bin/reproq`.
+- `METRICS_TLS_CERT`: Optional TLS certificate path for health/metrics.
+- `METRICS_TLS_KEY`: Optional TLS private key path for health/metrics.
+- `METRICS_TLS_CLIENT_CA`: Optional client CA bundle to require mTLS for health/metrics.
+- `ALLOWED_TASK_MODULES`: Optional allow-list for task module prefixes. If unset, `python manage.py reproq worker` auto-configures it from discovered task modules.
+- `REPROQ_LOGS_DIR`: Optional directory to persist worker stdout/stderr logs (updates `task_runs.logs_uri`).
+
+If `DATABASE_URL` is not set, `python manage.py reproq worker` derives a DSN from `settings.DATABASES["default"]` using `USER`, `PASSWORD`, `HOST`, `PORT`, and `NAME`.
+
+Worker binary resolution order:
+1. `REPROQ_WORKER_BIN` (setting or env)
+2. `./.reproq/bin/reproq` (installed by `reproq install`)
+3. `reproq_django/bin/reproq` (packaged fallback)
+4. `PATH`
 
 ### Schema Compatibility
 Reproq Django uses JSONB columns for worker metadata (`task_runs.worker_ids` and
@@ -87,6 +100,8 @@ The number of concurrent tasks a single worker process can handle is configurabl
 ```bash
 python manage.py reproq worker --concurrency 50
 ```
+
+Queue selection uses `--queues` (comma-separated). The legacy `--queue` flag remains for compatibility but is deprecated.
 
 ## 4. Periodic Tasks (Beat)
 

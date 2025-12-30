@@ -29,7 +29,8 @@ Reproq is split into two specialized components:
 
 ### 1. Install
 ```bash
-pip install reproq-django
+uv pip install reproq-django
+# or: pip install reproq-django
 ```
 
 ### 2. Configure Settings
@@ -122,10 +123,11 @@ result = send_welcome_email.enqueue(123, lock_key=f"user_123_sync")
 **Supported `enqueue` kwargs (Reproq extensions):**
 - `run_after`: `datetime` or `timedelta`. Delays execution.
 - `lock_key`: `str`. Prevents multiple tasks with the same key from being in `RUNNING` state simultaneously.
+- `priority`: `int`. Overrides the task's default priority for this enqueue only.
 
-**Reserved kwargs:** `run_after` is treated as scheduling metadata and is removed from task kwargs. If your task needs a parameter named `run_after`, rename it.
+**Reserved kwargs:** `run_after`, `lock_key`, and `priority` are treated as scheduling metadata and are removed from task kwargs. If your task needs parameters with these names, rename them.
 
-**Note on Priority:** The task priority is set at definition time via `@task(priority=...)`. Overriding priority via `enqueue(priority=...)` is currently **not supported**.
+**Note on Priority:** Task priority is set at definition time via `@task(priority=...)` and can be overridden per call via `enqueue(priority=...)`.
 
 ### Async Contexts (ASGI)
 If you are in an async view or task producer, use `aenqueue()` to avoid blocking:
@@ -177,9 +179,9 @@ TASKS = {
             # Max seconds a task can run before being killed by the worker.
             "TIMEOUT_SECONDS": 900,
 
-            # Retry Limit (Default: 5)
+            # Retry Limit (Default: 3)
             # Max number of attempts for a task.
-            "MAX_ATTEMPTS": 5,
+            "MAX_ATTEMPTS": 3,
 
             # Expiry (Optional)
             # If set, tasks not picked up by this time will be marked expired.
@@ -296,17 +298,31 @@ The `python manage.py reproq` command is your Swiss Army knife.
 | Subcommand | Description |
 | :--- | :--- |
 | `init` | Bootstraps Reproq in the current project. |
-| `worker` | Starts the Go worker. Flags: `--concurrency` (default 10), `--queues`, `--allowed-task-modules`, `--payload-mode`, `--metrics-port`, `--metrics-addr`, `--metrics-auth-token`, `--metrics-allow-cidrs`. |
-| `beat` | Starts the scheduler. Flags: `--interval` (default 30s). |
+| `worker` | Starts the Go worker. Flags: `--config`, `--concurrency` (default 10), `--queues`, `--allowed-task-modules`, `--logs-dir`, `--payload-mode`, `--metrics-port`, `--metrics-addr`, `--metrics-auth-token`, `--metrics-allow-cidrs`, `--metrics-tls-cert`, `--metrics-tls-key`, `--metrics-tls-client-ca`. Auto-configures allow-list when unset (unless config file is used). |
+| `beat` | Starts the scheduler. Flags: `--config`, `--interval` (default 30s). |
 | `install` | Downloads/builds the worker binary. |
 | `migrate-worker` | Applies essential SQL schema optimizations (indexes, extensions). |
 | `check` | Validates binary path, DB connection, and schema health. |
+| `allowlist` | Prints `ALLOWED_TASK_MODULES` computed from discovered task modules. |
 | `reclaim` | Requeue or fail tasks with expired leases. |
 | `prune-workers` | Delete workers not seen recently. |
 | `prune-successful` | Delete successful task runs older than a cutoff. |
 | `stats` | Shows task counts by status and active workers. |
 | `systemd` | Generates systemd service files for production. |
 | `stress-test` | Enqueues dummy tasks for benchmarking. |
+
+---
+
+## 🧾 Worker/Beat Config Files
+
+The Go worker/beat support YAML/TOML config files. `manage.py reproq worker` and `manage.py reproq beat`
+will load a config file when `--config` or `REPROQ_CONFIG` is set. If no worker/beat flags are provided,
+they also look for `reproq.yaml`, `reproq.yml`, `reproq.toml`, `.reproq.yaml`, `.reproq.yml`, or `.reproq.toml`
+in the current working directory. CLI flags override config values; environment variables override config values too.
+
+See `reproq.example.yaml` and `reproq.example.toml` for full templates.
+
+Queue selection uses `--queues` (comma-separated). The legacy `--queue` flag remains for compatibility but is deprecated.
 
 ---
 
@@ -330,7 +346,7 @@ Reproq integrates deeply with the Django Admin.
     - **Cancel**: Request cancellation of running/ready tasks.
 - **Workers**: Monitor active worker nodes, their concurrency, and last heartbeat.
 - **Periodic Tasks**: Create and manage cron schedules via the UI.
-- **Status Note**: Non-standard statuses like `WAITING` or `CANCELLED` are available via `raw_status` on results.
+- **Status Note**: Non-standard statuses like `WAITING` or `CANCELLED` map to `PENDING`/`CANCELLED` when supported by Django's `TaskResultStatus`. The original value is always available via `raw_status`.
 
 ---
 
@@ -351,12 +367,25 @@ The Go worker relies on standard environment variables:
 - `DATABASE_URL`: `postgres://user:pass@host:5432/db`
 - `WORKER_ID`: (Optional) Unique name for the node.
 - `REPROQ_WORKER_BIN`: (Optional) Path to the binary if not using `manage.py reproq install`.
-- `ALLOWED_TASK_MODULES`: (Optional) Comma-separated task module allow-list for the worker.
+- `REPROQ_CONFIG`: (Optional) Path to a YAML/TOML worker/beat config file.
+- `ALLOWED_TASK_MODULES`: (Optional) Comma-separated task module allow-list for the worker. If unset, `manage.py reproq worker` auto-configures it from discovered task modules.
+- `REPROQ_LOGS_DIR`: (Optional) Directory to persist worker stdout/stderr logs (updates `task_runs.logs_uri`).
 - `METRICS_AUTH_TOKEN`: (Optional) Bearer token for `/metrics` and `/healthz`.
 - `METRICS_ALLOW_CIDRS`: (Optional) Comma-separated IP/CIDR allow-list for metrics/health.
 - `METRICS_AUTH_LIMIT`: (Optional) Max unauthorized requests per window (default 30).
 - `METRICS_AUTH_WINDOW`: (Optional) Rate limit window (default 1m).
 - `METRICS_AUTH_MAX_ENTRIES`: (Optional) Max tracked hosts for auth rate limiting (default 1000).
+- `METRICS_TLS_CERT`: (Optional) TLS certificate path for health/metrics.
+- `METRICS_TLS_KEY`: (Optional) TLS private key path for health/metrics.
+- `METRICS_TLS_CLIENT_CA`: (Optional) Client CA bundle to require mTLS for health/metrics.
+
+If `DATABASE_URL` is not set, `manage.py reproq worker` derives a DSN from `settings.DATABASES["default"]`.
+
+Worker binary resolution order:
+1. `REPROQ_WORKER_BIN` (setting or env)
+2. `./.reproq/bin/reproq` (installed by `reproq install`)
+3. `reproq_django/bin/reproq` (packaged fallback)
+4. `PATH`
 
 ---
 

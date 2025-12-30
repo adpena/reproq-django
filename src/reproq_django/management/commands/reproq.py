@@ -23,21 +23,27 @@ class Command(BaseCommand):
 
         # Worker
         worker_parser = subparsers.add_parser("worker", help="Start the Go worker")
+        worker_parser.add_argument("--config", type=str, default="", help="Path to reproq config file")
         worker_parser.add_argument("--concurrency", type=int, default=10)
         worker_parser.add_argument("--queues", type=str, default="", help="Comma-separated queue names")
         worker_parser.add_argument("--queue", type=str, default="default", help="Deprecated (use --queues)")
         worker_parser.add_argument("--allowed-task-modules", type=str, default="", help="Comma-separated task module allow-list")
+        worker_parser.add_argument("--logs-dir", type=str, default="", help="Directory to persist stdout/stderr logs")
         worker_parser.add_argument("--payload-mode", type=str, default="", help="Payload mode: stdin|file|inline")
         worker_parser.add_argument("--metrics-port", type=int, default=0, help="Port to serve Prometheus metrics")
         worker_parser.add_argument("--metrics-addr", type=str, default="", help="Address to serve health/metrics")
         worker_parser.add_argument("--metrics-auth-token", type=str, default="", help="Bearer token required for health/metrics")
         worker_parser.add_argument("--metrics-allow-cidrs", type=str, default="", help="Comma-separated IP/CIDR allow-list")
+        worker_parser.add_argument("--metrics-tls-cert", type=str, default="", help="TLS certificate path for health/metrics")
+        worker_parser.add_argument("--metrics-tls-key", type=str, default="", help="TLS private key path for health/metrics")
+        worker_parser.add_argument("--metrics-tls-client-ca", type=str, default="", help="Client CA bundle to require mTLS for health/metrics")
         worker_parser.add_argument("--metrics-auth-limit", type=int, default=None, help="Unauthorized request limit per window")
         worker_parser.add_argument("--metrics-auth-window", type=str, default="", help="Rate limit window (e.g. 1m)")
         worker_parser.add_argument("--metrics-auth-max-entries", type=int, default=None, help="Max tracked hosts for auth rate limiting")
 
         # Beat
         beat_parser = subparsers.add_parser("beat", help="Start the periodic task scheduler (beat)")
+        beat_parser.add_argument("--config", type=str, default="", help="Path to reproq config file")
         beat_parser.add_argument("--interval", type=str, default="30s")
 
         # Migrate
@@ -64,6 +70,23 @@ class Command(BaseCommand):
         stress_parser.add_argument("--sleep", type=float, default=0, help="Time each task should sleep")
         stress_parser.add_argument("--bulk", action="store_true", help="Use bulk_enqueue")
 
+        # Allowlist
+        allowlist_parser = subparsers.add_parser(
+            "allowlist",
+            help="Compute ALLOWED_TASK_MODULES from installed task modules",
+        )
+        allowlist_parser.add_argument(
+            "--format",
+            choices=["env", "plain"],
+            default="env",
+            help="Output format (env prints ALLOWED_TASK_MODULES=...)",
+        )
+        allowlist_parser.add_argument(
+            "--show-tasks",
+            action="store_true",
+            help="Print discovered task paths",
+        )
+
         # systemd
         systemd_parser = subparsers.add_parser("systemd", help="Generate systemd service files")
         systemd_parser.add_argument("--user", type=str, help="User to run as")
@@ -71,11 +94,15 @@ class Command(BaseCommand):
         systemd_parser.add_argument("--concurrency", type=int, default=10)
         systemd_parser.add_argument("--queues", type=str, default="", help="Comma-separated queue names")
         systemd_parser.add_argument("--allowed-task-modules", type=str, default="", help="Comma-separated task module allow-list")
+        systemd_parser.add_argument("--logs-dir", type=str, default="", help="Directory to persist stdout/stderr logs")
         systemd_parser.add_argument("--payload-mode", type=str, default="", help="Payload mode: stdin|file|inline")
         systemd_parser.add_argument("--metrics-port", type=int, default=0, help="Port to serve Prometheus metrics")
         systemd_parser.add_argument("--metrics-addr", type=str, default="", help="Address to serve health/metrics")
         systemd_parser.add_argument("--metrics-auth-token", type=str, default="", help="Bearer token required for health/metrics")
         systemd_parser.add_argument("--metrics-allow-cidrs", type=str, default="", help="Comma-separated IP/CIDR allow-list")
+        systemd_parser.add_argument("--metrics-tls-cert", type=str, default="", help="TLS certificate path for health/metrics")
+        systemd_parser.add_argument("--metrics-tls-key", type=str, default="", help="TLS private key path for health/metrics")
+        systemd_parser.add_argument("--metrics-tls-client-ca", type=str, default="", help="Client CA bundle to require mTLS for health/metrics")
         systemd_parser.add_argument("--metrics-auth-limit", type=int, default=None, help="Unauthorized request limit per window")
         systemd_parser.add_argument("--metrics-auth-window", type=str, default="", help="Rate limit window (e.g. 1m)")
         systemd_parser.add_argument("--metrics-auth-max-entries", type=int, default=None, help="Max tracked hosts for auth rate limiting")
@@ -167,6 +194,8 @@ class Command(BaseCommand):
             self.run_install(options)
         elif subcommand == "migrate-worker":
             self.run_migrate()
+        elif subcommand == "allowlist":
+            self.run_allowlist(options)
         elif subcommand == "reclaim":
             self.run_reclaim(options)
         elif subcommand == "prune-workers":
@@ -319,12 +348,20 @@ class Command(BaseCommand):
             worker_args.extend(["--queues", options["queues"]])
         if options.get("allowed_task_modules"):
             worker_args.extend(["--allowed-task-modules", options["allowed_task_modules"]])
+        if options.get("logs_dir"):
+            worker_args.extend(["--logs-dir", options["logs_dir"]])
         if options.get("payload_mode"):
             worker_args.extend(["--payload-mode", options["payload_mode"]])
         if options.get("metrics_addr"):
             worker_args.extend(["--metrics-addr", options["metrics_addr"]])
         elif options.get("metrics_port"):
             worker_args.extend(["--metrics-port", str(options["metrics_port"])])
+        if options.get("metrics_tls_cert"):
+            worker_args.extend(["--metrics-tls-cert", options["metrics_tls_cert"]])
+        if options.get("metrics_tls_key"):
+            worker_args.extend(["--metrics-tls-key", options["metrics_tls_key"]])
+        if options.get("metrics_tls_client_ca"):
+            worker_args.extend(["--metrics-tls-client-ca", options["metrics_tls_client_ca"]])
         beat_args = [python_bin, manage_py, "reproq", "beat"]
 
         services = {
@@ -681,40 +718,149 @@ WantedBy=multi-user.target
             raise CommandError(
                 f"Worker binary not found (resolved: {resolved_bin or worker_bin}). {hint}"
             )
-        if not dsn:
+        if cmd == "worker":
+            explicit_flags = any(
+                self._flag_present(flag)
+                for flag in [
+                    "--config",
+                    "--concurrency",
+                    "--queues",
+                    "--queue",
+                    "--allowed-task-modules",
+                    "--logs-dir",
+                    "--payload-mode",
+                    "--metrics-port",
+                    "--metrics-addr",
+                    "--metrics-auth-token",
+                    "--metrics-allow-cidrs",
+                    "--metrics-tls-cert",
+                    "--metrics-tls-key",
+                    "--metrics-tls-client-ca",
+                    "--metrics-auth-limit",
+                    "--metrics-auth-window",
+                    "--metrics-auth-max-entries",
+                ]
+            )
+        else:
+            explicit_flags = any(
+                self._flag_present(flag)
+                for flag in [
+                    "--config",
+                    "--interval",
+                ]
+            )
+
+        config_path = self._resolve_config_path(options.get("config"), not explicit_flags)
+        use_config = bool(config_path)
+        if use_config and not os.path.exists(config_path):
+            raise CommandError(f"Config file not found: {config_path}")
+
+        if not dsn and not use_config:
             raise CommandError(
                 "DATABASE_URL not set. Reproq worker requires a Postgres DSN."
             )
+
         self.stdout.write(f"Worker binary: {resolved_bin or worker_bin}")
-        self.stdout.write(f"DSN: {self._mask_dsn(dsn)}")
-        args = [worker_bin, cmd, "--dsn", dsn]
+        if use_config:
+            self.stdout.write(f"Config: {config_path}")
+        else:
+            self.stdout.write(f"DSN: {self._mask_dsn(dsn)}")
+
+        args = [worker_bin, cmd]
+        if use_config:
+            args.extend(["--config", config_path])
+        else:
+            args.extend(["--dsn", dsn])
+
         if cmd == "worker":
-            args.extend(["--concurrency", str(options["concurrency"])])
-            queues = options.get("queues") or ""
-            if queues:
-                args.extend(["--queues", queues])
+            if use_config:
+                if self._flag_present("--concurrency"):
+                    args.extend(["--concurrency", str(options["concurrency"])])
+                if self._flag_present("--queues"):
+                    args.extend(["--queues", options.get("queues") or ""])
+                elif self._flag_present("--queue"):
+                    args.extend(["--queues", options.get("queue", "default")])
+                if self._flag_present("--allowed-task-modules"):
+                    args.extend(["--allowed-task-modules", options.get("allowed_task_modules") or ""])
+                if self._flag_present("--logs-dir"):
+                    args.extend(["--logs-dir", options.get("logs_dir") or ""])
+                if self._flag_present("--payload-mode"):
+                    args.extend(["--payload-mode", options.get("payload_mode") or ""])
+                if self._flag_present("--metrics-port"):
+                    args.extend(["--metrics-port", str(options["metrics_port"])])
+                if self._flag_present("--metrics-addr"):
+                    args.extend(["--metrics-addr", options.get("metrics_addr") or ""])
+                if self._flag_present("--metrics-auth-token"):
+                    args.extend(["--metrics-auth-token", options.get("metrics_auth_token") or ""])
+                if self._flag_present("--metrics-allow-cidrs"):
+                    args.extend(["--metrics-allow-cidrs", options.get("metrics_allow_cidrs") or ""])
+                if self._flag_present("--metrics-auth-limit"):
+                    args.extend(["--metrics-auth-limit", str(options["metrics_auth_limit"])])
+                if self._flag_present("--metrics-auth-window"):
+                    args.extend(["--metrics-auth-window", options.get("metrics_auth_window") or ""])
+                if self._flag_present("--metrics-auth-max-entries"):
+                    args.extend(["--metrics-auth-max-entries", str(options["metrics_auth_max_entries"])])
+                if self._flag_present("--metrics-tls-cert"):
+                    args.extend(["--metrics-tls-cert", options.get("metrics_tls_cert") or ""])
+                if self._flag_present("--metrics-tls-key"):
+                    args.extend(["--metrics-tls-key", options.get("metrics_tls_key") or ""])
+                if self._flag_present("--metrics-tls-client-ca"):
+                    args.extend(["--metrics-tls-client-ca", options.get("metrics_tls_client_ca") or ""])
             else:
-                args.extend(["--queues", options.get("queue", "default")])
-            if options.get("allowed_task_modules"):
-                args.extend(["--allowed-task-modules", options["allowed_task_modules"]])
-            if options.get("payload_mode"):
-                args.extend(["--payload-mode", options["payload_mode"]])
-            if options.get("metrics_port"):
-                args.extend(["--metrics-port", str(options["metrics_port"])])
-            if options.get("metrics_addr"):
-                args.extend(["--metrics-addr", options["metrics_addr"]])
-            if options.get("metrics_auth_token"):
-                args.extend(["--metrics-auth-token", options["metrics_auth_token"]])
-            if options.get("metrics_allow_cidrs"):
-                args.extend(["--metrics-allow-cidrs", options["metrics_allow_cidrs"]])
-            if options.get("metrics_auth_limit") is not None:
-                args.extend(["--metrics-auth-limit", str(options["metrics_auth_limit"])])
-            if options.get("metrics_auth_window"):
-                args.extend(["--metrics-auth-window", options["metrics_auth_window"]])
-            if options.get("metrics_auth_max_entries") is not None:
-                args.extend(["--metrics-auth-max-entries", str(options["metrics_auth_max_entries"])])
+                args.extend(["--concurrency", str(options["concurrency"])])
+                queues = options.get("queues") or ""
+                if queues:
+                    args.extend(["--queues", queues])
+                else:
+                    args.extend(["--queues", options.get("queue", "default")])
+                if options.get("allowed_task_modules"):
+                    args.extend(["--allowed-task-modules", options["allowed_task_modules"]])
+                elif os.environ.get("ALLOWED_TASK_MODULES"):
+                    self.stdout.write("ALLOWED_TASK_MODULES set in environment; using it.")
+                else:
+                    auto_modules, task_paths, errors = self._compute_allowed_task_modules()
+                    if errors:
+                        self._report_allowlist_errors(errors)
+                    if auto_modules:
+                        auto_value = ",".join(auto_modules)
+                        args.extend(["--allowed-task-modules", auto_value])
+                        self.stdout.write(f"Auto-configured ALLOWED_TASK_MODULES={auto_value}")
+                    else:
+                        self.stderr.write(
+                            self.style.WARNING(
+                                "No task modules discovered; default allow-list will be used."
+                            )
+                        )
+                if options.get("logs_dir"):
+                    args.extend(["--logs-dir", options["logs_dir"]])
+                if options.get("payload_mode"):
+                    args.extend(["--payload-mode", options["payload_mode"]])
+                if options.get("metrics_port"):
+                    args.extend(["--metrics-port", str(options["metrics_port"])])
+                if options.get("metrics_addr"):
+                    args.extend(["--metrics-addr", options["metrics_addr"]])
+                if options.get("metrics_auth_token"):
+                    args.extend(["--metrics-auth-token", options["metrics_auth_token"]])
+                if options.get("metrics_allow_cidrs"):
+                    args.extend(["--metrics-allow-cidrs", options["metrics_allow_cidrs"]])
+                if options.get("metrics_tls_cert"):
+                    args.extend(["--metrics-tls-cert", options["metrics_tls_cert"]])
+                if options.get("metrics_tls_key"):
+                    args.extend(["--metrics-tls-key", options["metrics_tls_key"]])
+                if options.get("metrics_tls_client_ca"):
+                    args.extend(["--metrics-tls-client-ca", options["metrics_tls_client_ca"]])
+                if options.get("metrics_auth_limit") is not None:
+                    args.extend(["--metrics-auth-limit", str(options["metrics_auth_limit"])])
+                if options.get("metrics_auth_window"):
+                    args.extend(["--metrics-auth-window", options["metrics_auth_window"]])
+                if options.get("metrics_auth_max_entries") is not None:
+                    args.extend(["--metrics-auth-max-entries", str(options["metrics_auth_max_entries"])])
         elif cmd == "beat":
-            args.extend(["--interval", options["interval"]])
+            if use_config:
+                if self._flag_present("--interval"):
+                    args.extend(["--interval", options["interval"]])
+            else:
+                args.extend(["--interval", options["interval"]])
             
         self.stdout.write(f"Starting {cmd}...")
         try:
@@ -723,6 +869,26 @@ WantedBy=multi-user.target
             pass
         except Exception as e:
             self.stderr.write(self.style.ERROR(f"Error running {cmd}: {e}"))
+
+    def run_allowlist(self, options):
+        allowed, task_paths, errors = self._compute_allowed_task_modules()
+        if errors:
+            self._report_allowlist_errors(errors)
+        if options.get("show_tasks"):
+            if task_paths:
+                self.stdout.write("Task paths:")
+                for path in task_paths:
+                    self.stdout.write(f"  - {path}")
+            else:
+                self.stdout.write("Task paths: (none discovered)")
+        if not allowed:
+            self.stdout.write(self.style.WARNING("No task modules discovered."))
+            return
+        allowed_value = ",".join(allowed)
+        if options.get("format") == "plain":
+            self.stdout.write(allowed_value)
+        else:
+            self.stdout.write(f"ALLOWED_TASK_MODULES={allowed_value}")
 
     def run_stats(self):
         from reproq_django.models import TaskRun, Worker
@@ -824,6 +990,36 @@ WantedBy=multi-user.target
         if not user or not name: return None
         return f"postgres://{user}:{db_conf.get('PASSWORD', '')}@{db_conf.get('HOST', 'localhost')}:{db_conf.get('PORT', '5432')}/{name}"
 
+    def _flag_present(self, flag):
+        for arg in sys.argv:
+            if arg == flag or arg.startswith(flag + "="):
+                return True
+        return False
+
+    def _find_default_config(self):
+        candidates = [
+            "reproq.yaml",
+            "reproq.yml",
+            "reproq.toml",
+            ".reproq.yaml",
+            ".reproq.yml",
+            ".reproq.toml",
+        ]
+        for name in candidates:
+            if os.path.exists(name):
+                return name
+        return ""
+
+    def _resolve_config_path(self, option_value, allow_default):
+        if option_value:
+            return option_value
+        env_value = os.environ.get("REPROQ_CONFIG")
+        if env_value:
+            return env_value
+        if allow_default:
+            return self._find_default_config()
+        return ""
+
     def _resolve_worker_bin(self):
         worker_bin = self.get_worker_bin()
         if os.path.isabs(worker_bin):
@@ -854,3 +1050,85 @@ WantedBy=multi-user.target
     def _render_env(self, key, value):
         escaped = str(value).replace('"', '\\"')
         return f'Environment="{key}={escaped}"'
+
+    def _compute_allowed_task_modules(self):
+        task_paths, errors = self._discover_task_paths()
+        allowed = set()
+        for path in task_paths:
+            if "." in path:
+                allowed.add(path.rsplit(".", 1)[0] + ".")
+        return sorted(allowed), sorted(task_paths), errors
+
+    def _discover_task_paths(self):
+        import importlib.util
+        import pkgutil
+        from django.apps import apps
+
+        task_paths = set()
+        errors = []
+
+        for app_config in apps.get_app_configs():
+            module_name = f"{app_config.name}.tasks"
+            try:
+                spec = importlib.util.find_spec(module_name)
+            except Exception:
+                spec = None
+            if spec is None:
+                continue
+            module = self._safe_import(module_name, errors)
+            if module:
+                self._collect_task_paths(module, task_paths)
+            if spec.submodule_search_locations:
+                for _, name, _ in pkgutil.walk_packages(
+                    spec.submodule_search_locations,
+                    prefix=module_name + ".",
+                ):
+                    submodule = self._safe_import(name, errors)
+                    if submodule:
+                        self._collect_task_paths(submodule, task_paths)
+
+        return task_paths, errors
+
+    def _safe_import(self, module_name, errors):
+        import importlib
+
+        try:
+            return importlib.import_module(module_name)
+        except Exception as exc:
+            errors.append(f"Failed to import {module_name}: {exc}")
+            return None
+
+    def _collect_task_paths(self, module, task_paths):
+        for value in module.__dict__.values():
+            path = self._extract_task_path(value)
+            if path:
+                task_paths.add(path)
+
+    def _extract_task_path(self, candidate):
+        try:
+            from django.tasks import Task
+        except Exception:
+            Task = None
+
+        if Task and isinstance(candidate, Task):
+            module_path = getattr(candidate, "module_path", None)
+            if isinstance(module_path, str) and module_path:
+                return module_path
+            for attr in ("path", "name"):
+                value = getattr(candidate, attr, None)
+                if isinstance(value, str) and "." in value:
+                    return value
+
+        module_path = getattr(candidate, "module_path", None)
+        if isinstance(module_path, str) and "." in module_path:
+            return module_path
+
+        nested = getattr(candidate, "task", None)
+        if nested is not None:
+            return self._extract_task_path(nested)
+
+        return None
+
+    def _report_allowlist_errors(self, errors):
+        for message in errors:
+            self.stderr.write(self.style.WARNING(message))
