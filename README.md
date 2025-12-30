@@ -12,21 +12,16 @@ Reproq is a production-grade tasks backend that combines the ease of Django with
 ## 🤝 Relationship with Reproq Worker
 
 Reproq is split into two specialized components:
-1. **Reproq Django (this repo)**: The "Brain." It provides the Django 6.0 Tasks API, handles task definition, enqueuing, results, and the Admin dashboard.
-2. **[Reproq Worker](https://github.com/adpena/reproq-worker)**: The "Muscle." A standalone Go binary that polls the database and executes tasks with extreme efficiency and reliability.
-
----
+1. **Reproq Django (this repo)**: Task definition, enqueueing, results, and the Admin dashboard.
+2. **[Reproq Worker](https://github.com/adpena/reproq-worker)**: A Go binary that claims and executes tasks from Postgres.
 
 ## Key Features
 
-- **Postgres-Only**: Uses `SKIP LOCKED` for high-performance, atomic task claiming.
-- **Deterministic**: Every task has a `spec_hash` (SHA256). Identical tasks can be automatically de-duplicated.
-- **Strict Isolation**: The Go worker invokes Django tasks via a strict JSON-over-stdin protocol.
-- **Django Native**: Implements the Django 6.0 `BaseTaskBackend` API.
-- **Periodic Tasks**: Built-in support for cron-like scheduling managed via Django models.
-- **Monitoring**: Beautiful Django Admin integration to view, retry, and replay tasks.
-- **Worker Heartbeats**: Track active worker nodes and their health in real-time.
-- **Exponential Backoff**: Automatic retry delays that scale with failure count.
+- **Postgres-Only**: Uses `SKIP LOCKED` for high-performance claiming.
+- **Deterministic**: Each task has a `spec_hash` for deduplication.
+- **Django Native**: Implements the Django 6.0 Tasks API.
+- **Periodic Tasks**: Built-in scheduler with Django models.
+- **Monitoring**: TaskRuns + Workers in Django Admin.
 
 ---
 
@@ -49,6 +44,11 @@ INSTALLED_APPS = [
 TASKS = {
     "default": {
         "BACKEND": "reproq_django.backend.ReproqBackend",
+        "OPTIONS": {
+            "DEDUP_ACTIVE": True,
+            "TIMEOUT_SECONDS": 900,
+            "MAX_ATTEMPTS": 3,
+        }
     }
 }
 ```
@@ -65,9 +65,7 @@ python manage.py reproq install
 python manage.py reproq migrate-worker
 python manage.py migrate
 ```
-If you previously applied the legacy Reproq Worker SQL migrations, run
-`migrations/000013_convert_worker_arrays_to_jsonb.up.sql` from the
-reproq-worker repo to convert array columns to JSONB.
+*Note: `migrate-worker` applies necessary Postgres optimizations (indexes, extensions) that Django migrations cannot handle.*
 
 ### 5. Start the Worker
 ```bash
@@ -76,224 +74,233 @@ python manage.py reproq worker
 
 ---
 
-## 🛠 Usage
+## ✅ Why Reproq (vs Celery, RQ, Huey)
 
-### Defining and Enqueueing Tasks
-Use the standard Django 6.0 `@task` decorator:
+Reproq is built for teams who want deterministic background tasks without adding Redis or RabbitMQ.
+
+- **No extra broker**: Uses Postgres only; no Redis/RabbitMQ to provision.
+- **Deterministic deduping**: Identical tasks can be coalesced safely.
+- **Django-native**: Implements the Django 6.0 Tasks API end-to-end.
+- **Operationally lean**: One database + one Go worker binary.
+
+If you need complex routing, multi-broker support, or huge existing Celery ecosystems, Celery may still fit better. Reproq prioritizes clarity, determinism, and low operational overhead.
+
+---
+
+## 📚 API Reference
+
+Reproq fully implements the Django 6.0 Tasks API.
+
+### Defining Tasks
+Use the standard `@task` decorator. Reproq respects `queue_name` and `priority`.
 
 ```python
 from django.tasks import task
 
-@task(queue_name="high-priority")
+@task(queue_name="high-priority", priority=100)
 def send_welcome_email(user_id):
     # logic here
     return f"Email sent to {user_id}"
+```
 
-# Enqueue for background execution
+### Enqueuing Tasks
+Use `.enqueue()` to dispatch tasks. Reproq supports additional arguments via `kwargs`.
+
+```python
+# Standard Enqueue
 result = send_welcome_email.enqueue(123)
 
-# Wait for result (optional)
-result.wait(timeout=5)
-print(result.result) # "Email sent to 123"
+# Scheduled Execution (run_after)
+from datetime import timedelta
+result = send_welcome_email.using(run_after=timedelta(minutes=10)).enqueue(123)
+
+# Concurrency Control (lock_key)
+# Ensure only one task with this key runs at a time
+result = send_welcome_email.enqueue(123, lock_key=f"user_123_sync")
 ```
 
-### Forward-Compatible Task Signatures
-When rolling out new task arguments, consider accepting `**kwargs` so older
-workers can safely ignore unknown fields during a deploy:
+**Supported `enqueue` kwargs (Reproq extensions):**
+- `run_after`: `datetime` or `timedelta`. Delays execution.
+- `lock_key`: `str`. Prevents multiple tasks with the same key from being in `RUNNING` state simultaneously.
+
+**Reserved kwargs:** `run_after` is treated as scheduling metadata and is removed from task kwargs. If your task needs a parameter named `run_after`, rename it.
+
+**Note on Priority:** The task priority is set at definition time via `@task(priority=...)`. Overriding priority via `enqueue(priority=...)` is currently **not supported**.
+
+### Async Contexts (ASGI)
+If you are in an async view or task producer, use `aenqueue()` to avoid blocking:
 
 ```python
-@task
-def send_welcome_email(user_id, **_kwargs):
-    return f"Email sent to {user_id}"
+result = await send_welcome_email.aenqueue(123)
 ```
 
-### Periodic Tasks (Cron)
-Manage recurring tasks directly from the Django Admin or using the `PeriodicTask` model.
+In sync/Wsgi code, continue to use `enqueue()`.
 
-```python
-from reproq_django.models import PeriodicTask
+### Bulk Enqueuing
+For high-throughput scenarios, use `bulk_enqueue` to insert thousands of tasks in a single query.
 
-PeriodicTask.objects.create(
-    name="Clean old logs",
-    task_path="myapp.tasks.cleanup",
-    cron="0 0 * * *", # Daily at midnight
-    queue_name="maintenance"
-)
-```
-
-Ensure the `reproq beat` process is running to trigger these schedules. Only one instance of `beat` should be active per database.
-
-
----
-
-## advanced Features
-
-### Concurrency Control (Lock Key)
-Prevent multiple tasks from operating on the same resource simultaneously:
-
-```python
-@task
-def process_user(user_id):
-    pass
-
-# Ensure only one task for 'user_123' runs at a time
-process_user.enqueue(123, lock_key="user_123")
-```
-
-### Workflows (Chains & Groups)
-Execute tasks in sequence or parallel:
-
-```python
-from reproq_django.workflows import chain, group
-
-# Sequential execution
-chain(task_a, task_b, task_c).enqueue()
-
-# Parallel execution
-group(task_1, task_2, task_3).enqueue()
-```
-
----
-
-## 🖥 Management Commands
-
-The `reproq` command is your primary tool for managing the task system.
-
-| Command | Description |
-| :--- | :--- |
-| `python manage.py reproq init` | **Recommended**: Complete bootstrap of the environment. |
-| `python manage.py reproq worker` | Starts the Go worker. Supports `--concurrency`. |
-| `python manage.py reproq beat` | Starts the Go scheduler for periodic tasks. |
-| `python manage.py reproq systemd` | Generates service files. Supports `--concurrency`. |
-| `python manage.py reproq check` | High-depth validation of binary, DB, and schema. |
-| `python manage.py reproq reclaim` | Reclaim or fail tasks with expired leases. |
-| `python manage.py reproq_health` | Health check for DB, workers, and queues. |
-
----
-
-## 🔌 Integration Guide
-
-Reproq implements the **Django 6.0 Tasks API**.
-
-### Basic Usage
-```python
-from django.tasks import task
-
-@task
-def add(a, b):
-    return a + b
-
-# Standard Django enqueue
-result = add.enqueue(1, 2)
-```
-
-### High-Performance Bulk Injection
-For enqueuing thousands of tasks, use the specialized `bulk_enqueue` method to minimize DB round-trips:
 ```python
 from django.tasks import tasks
-backend = tasks["default"]
+from datetime import timedelta
 
-jobs = [(my_task, (i,), {}) for i in range(1000)]
+backend = tasks["default"]
+jobs = []
+
+for i in range(1000):
+    # (task_func, args, kwargs)
+    jobs.append((
+        send_welcome_email,
+        (i,),
+        {"lock_key": f"user_{i}", "run_after": timedelta(seconds=i)}
+    ))
+
 backend.bulk_enqueue(jobs)
 ```
 
 ---
 
-## 🚀 Production Deployment
+## ⚙️ Configuration
 
-Reproq is built for stability. We recommend using `systemd` to manage your worker processes.
-
-### Deployment Options
-
-**Option A (Recommended): Separate worker + beat processes**
-- Run `python manage.py reproq worker` and `python manage.py reproq beat` as dedicated processes.
-- Use a supervisor (systemd, supervisor, or separate container/services) so they restart automatically.
-
-**Option B: Single-service (web + worker + beat)**
-- Run the worker and beat in the same service as your web process.
-- Simpler to deploy, but less reliable: background processes are not supervised and can die silently.
- - For deploy-time tasks (like deploy notifications), enqueue them after the worker starts and guard with a deploy ID (for example, `RENDER_DEPLOY_ID`) to avoid old workers claiming them.
-
-Example single-service start command:
-```bash
-/bin/bash -lc "
-python manage.py reproq worker --concurrency 5 &
-python manage.py reproq beat --interval 30s &
-exec gunicorn myproj.wsgi:application --workers=1 --timeout=120
-"
-```
-
-Only one `beat` instance should run per database.
-
-1. **Generate Service Files**:
-   ```bash
-   # Create services with custom concurrency
-   python manage.py reproq systemd --concurrency 20
-   ```
-2. **Install & Start**:
-   Follow the on-screen instructions to move the files to `/etc/systemd/system/` and enable them. This ensures your worker and beat processes auto-restart on failure and start automatically on boot.
-
----
-
-## 🔍 Monitoring & Management
-
-Reproq comes with a powerful Django Admin interface.
-
-1. **Task List**: View all tasks, their status, queues, and execution times.
-2. **Details**: See the exact arguments (`spec_json`), the return value, or the full traceback if it failed.
-3. **Replay**: Select any task and use the "Replay selected tasks" action. This creates a fresh copy of the task and enqueues it, perfect for manual retries after fixing a bug.
-4. **Periodic Tasks**: Manage your cron schedules directly from the UI.
-
----
-
-## ⚙️ Advanced Configuration
-
-You can customize the backend behavior in `settings.py`:
+Configure Reproq behavior via the `TASKS` setting in `settings.py`.
 
 ```python
 TASKS = {
     "default": {
         "BACKEND": "reproq_django.backend.ReproqBackend",
         "OPTIONS": {
-            "DEDUP_ACTIVE": True,      # Coalesce identical tasks if already READY/RUNNING
-            "TIMEOUT_SECONDS": 900,     # Max execution time before worker kills the task
-            "MAX_ATTEMPTS": 5,          # Retries for failed tasks
+            # Deduplication (Default: True)
+            # If True, enqueuing a task with the exact same arguments as a 
+            # READY/RUNNING task will return the existing result_id.
+            "DEDUP_ACTIVE": True,
+
+            # Execution Timeout (Default: 900)
+            # Max seconds a task can run before being killed by the worker.
+            "TIMEOUT_SECONDS": 900,
+
+            # Retry Limit (Default: 5)
+            # Max number of attempts for a task.
+            "MAX_ATTEMPTS": 5,
+
+            # Expiry (Optional)
+            # If set, tasks not picked up by this time will be marked expired.
+            "EXPIRES_IN": timedelta(hours=24),
+            
+            # Provenance (Optional)
+            # Metadata stored with the task for auditing.
+            "CODE_REF": "git-sha-or-version",
+            "PIP_LOCK_HASH": "hash-of-dependencies",
         }
     }
 }
-
-# Path to the Go binary (if not in PATH). If unset, Reproq uses `./.reproq/bin/reproq`.
-REPROQ_WORKER_BIN = "/usr/local/bin/reproq"
 ```
 
-If `REPROQ_WORKER_BIN` is set, `python manage.py reproq install` will install the
-binary at that path.
+---
+
+## ⛓ Workflows (Chains & Groups)
+
+Reproq supports complex task dependencies.
+
+### Chains (Sequential)
+Execute tasks one after another. If a task fails, the chain stops.
+
+```python
+from reproq_django.workflows import chain
+
+# task_a -> task_b -> task_c
+c = chain(
+    (task_a, (1,), {}),
+    task_b, # no args
+    (task_c, (), {"param": "val"})
+)
+results = c.enqueue()
+# results[0] is READY, results[1..] are WAITING
+```
+
+### Groups (Parallel)
+Execute tasks in parallel. Groups do not provide a "chord" callback yet; they are a convenience for enqueueing multiple independent tasks at once.
+
+```python
+from reproq_django.workflows import group
+
+g = group(
+    (resize_image, ("img1.jpg",), {}),
+    (resize_image, ("img2.jpg",), {}),
+)
+results = g.enqueue()
+```
 
 ---
 
-## 📋 Checklist for Production
+## 🔁 Retries & Backoff
 
-- [ ] Ensure `DATABASE_URL` is set if not using Django's default DB configuration.
-- [ ] Set `REPROQ_WORKER_BIN` if the binary is in a custom location.
-- [ ] Configure `MAX_ATTEMPTS` and `TIMEOUT_SECONDS` for your workload.
-- [ ] Set up a process supervisor (like Systemd or Supervisor) for `python manage.py reproq worker`.
-- [ ] If using periodic tasks, ensure `python manage.py reproq beat` is also running (only one instance needed).
+Retries are managed by the Go worker. When a task fails and attempts remain, it is re-queued with an **exponential backoff**:
 
-## 🤝 Contributing & Feedback
+- Base delay: 30s
+- Backoff: `2^attempt` (attempt starts at 1)
+- Cap: 1 hour
 
-Reproq is an open-source project and we love contributions! 
-
-- **Found a bug?** Open an [issue](https://github.com/adpena/reproq-django/issues).
-- **Want a feature?** Let's discuss it in the issues or submit a PR.
-- **Questions?** Feel free to reach out or start a discussion.
-
-We are specifically looking for feedback on developer experience (DX) and performance in high-scale environments.
+The worker updates `run_after` on the failed task, and the backend will only claim it after that timestamp.
 
 ---
 
-## 📜 Documentation & Guides
+## 🖥 Management Commands
 
-- [Architecture Overview](docs/architecture.md)
-- [Deployment Guide](docs/deployment.md)
-- [Handling Large Payloads](docs/payloads.md)
-- [Deterministic Tasks Guide](docs/determinism.md)
+The `python manage.py reproq` command is your Swiss Army knife.
+
+| Subcommand | Description |
+| :--- | :--- |
+| `init` | Bootstraps Reproq in the current project. |
+| `worker` | Starts the Go worker. Flags: `--concurrency` (default 10), `--queue`. |
+| `beat` | Starts the scheduler. Flags: `--interval` (default 30s). |
+| `install` | Downloads/builds the worker binary. |
+| `migrate-worker` | Applies essential SQL schema optimizations (indexes, extensions). |
+| `check` | Validates binary path, DB connection, and schema health. |
+| `reclaim` | Requeue or fail tasks with expired leases. |
+| `stats` | Shows task counts by status and active workers. |
+| `systemd` | Generates systemd service files for production. |
+| `stress-test` | Enqueues dummy tasks for benchmarking. |
+| `reproq_health` | Health check for DB, workers, and queues. |
+
+---
+
+## 🔍 Admin Dashboard
+
+Reproq integrates deeply with the Django Admin.
+
+- **Task Runs**: View all tasks. Filter by status, queue, or lease state.
+- **Actions**:
+    - **Replay**: Select tasks to re-enqueue them (creates a new copy).
+    - **Retry Failed**: Reset failed tasks to READY.
+    - **Cancel**: Request cancellation of running/ready tasks.
+- **Workers**: Monitor active worker nodes, their concurrency, and last heartbeat.
+- **Periodic Tasks**: Create and manage cron schedules via the UI.
+- **Status Note**: Non-standard statuses like `WAITING` or `CANCELLED` are available via `raw_status` on results.
+
+---
+
+## 🚀 Production Deployment
+
+### Recommended Setup (Systemd)
+Generate service files to run the worker and beat processes as background daemons.
+
+```bash
+python manage.py reproq systemd --user myuser --concurrency 20
+```
+
+This generates `reproq-worker.service` and `reproq-beat.service`. Copy them to `/etc/systemd/system/` and enable them.
+
+### Env Vars
+The Go worker relies on standard environment variables:
+- `DATABASE_URL`: `postgres://user:pass@host:5432/db`
+- `WORKER_ID`: (Optional) Unique name for the node.
+- `REPROQ_WORKER_BIN`: (Optional) Path to the binary if not using `manage.py reproq install`.
+
+---
+
+## 🤝 Contributing
+
+Reproq is split into two repos:
+- **Reproq Django**: This repo (Python/Django logic).
+- **Reproq Worker**: The Go execution engine.
+
+Issues and PRs are welcome in both!

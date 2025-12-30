@@ -35,7 +35,7 @@ class ReproqBackend(BaseTaskBackend):
 
     def enqueue(self, task, args, kwargs) -> TaskResultProxy:
         self.validate_task(task)
-        run_after_dt = _normalize_run_after(task.run_after)
+        run_after_dt = _normalize_run_after(kwargs.pop("run_after", task.run_after))
 
         spec = {
             "v": 1,
@@ -156,7 +156,9 @@ class ReproqBackend(BaseTaskBackend):
         return [TaskResultProxy(str(run.result_id), self) for run in created]
 
     async def aenqueue(self, task, args, kwargs) -> TaskResultProxy:
-        return await sync_to_async(self.enqueue)(task, args, kwargs)
+        return await sync_to_async(self.enqueue, thread_sensitive=True)(
+            task, args, kwargs
+        )
 
     async def aget_result(self, result_id: str) -> TaskResultProxy:
         return TaskResultProxy(result_id, self)

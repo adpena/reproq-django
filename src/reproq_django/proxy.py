@@ -28,7 +28,7 @@ class TaskResultProxy:
         return self
 
     async def arefresh(self):
-        return await sync_to_async(self.refresh)()
+        return await sync_to_async(self.refresh, thread_sensitive=True)()
 
     @property
     def data(self):
@@ -38,7 +38,17 @@ class TaskResultProxy:
 
     @property
     def status(self) -> TaskResultStatus:
-        return TaskResultStatus(self.data.status)
+        try:
+            return TaskResultStatus(self.data.status)
+        except ValueError as exc:
+            raise RuntimeError(
+                f"Task {self.id} has non-standard status {self.data.status!r}. "
+                "Use raw_status to inspect it."
+            ) from exc
+
+    @property
+    def raw_status(self) -> str:
+        return self.data.status
 
     @property
     def enqueued_at(self): return self.data.enqueued_at

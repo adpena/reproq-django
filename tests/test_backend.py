@@ -11,6 +11,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../s
 
 from django.conf import settings
 from django.tasks import Task, TaskResultStatus
+from django.utils import timezone as dj_timezone
 
 if not settings.configured:
     settings.configure(
@@ -67,6 +68,19 @@ class TestReproqBackend(unittest.TestCase):
 
         self.assertEqual(res1.id, res2.id)
         self.assertEqual(TaskRun.objects.count(), 1)
+
+    def test_run_after_kwarg_is_reserved(self):
+        my_func.__module__ = "test_module"
+        task = Task(func=my_func, priority=0, queue_name="q", backend="default", run_after=None)
+        delay = timedelta(minutes=5)
+
+        result = self.backend.enqueue(task, (), {"run_after": delay, "debug": True})
+        run = TaskRun.objects.get(result_id=result.id)
+
+        self.assertIsInstance(run.spec_json.get("run_after"), str)
+        self.assertEqual(run.spec_json["kwargs"], {"debug": True})
+        self.assertIsNotNone(run.run_after)
+        self.assertGreater(run.run_after, dj_timezone.now() + timedelta(minutes=4))
 
 class TestReproqManagement(unittest.TestCase):
     @patch("subprocess.check_output")

@@ -27,8 +27,7 @@ class Chain:
             wait_count = 0 if i == 0 else 1
             
             # We bypass the backend's enqueue to handle the complex state
-            from django.tasks import tasks
-            backend = tasks[task.backend or "default"]
+            backend = task.get_backend()
             
             # Normalize spec (reusing logic from backend would be better)
             # For brevity, we create the record directly
@@ -40,7 +39,8 @@ class Chain:
                     "task_path": task.module_path,
                     "args": args,
                     "kwargs": kwargs,
-                    "v": 1
+                    "takes_context": getattr(task, "takes_context", False),
+                    "v": 1,
                 },
                 spec_hash=uuid.uuid4().hex, # Workflows bypass simple dedupe for now
                 status=status,
@@ -65,15 +65,13 @@ class Group:
 
     def enqueue(self) -> List[TaskResultProxy]:
         results = []
-        from django.tasks import tasks
-        
         for item in self.tasks:
             if isinstance(item, tuple):
                 task, args, kwargs = item
             else:
                 task, args, kwargs = item, (), {}
             
-            backend = tasks[task.backend or "default"]
+            backend = task.get_backend()
             
             run = TaskRun.objects.create(
                 backend_alias=backend.alias,
@@ -83,7 +81,8 @@ class Group:
                     "task_path": task.module_path,
                     "args": args,
                     "kwargs": kwargs,
-                    "v": 1
+                    "takes_context": getattr(task, "takes_context", False),
+                    "v": 1,
                 },
                 spec_hash=uuid.uuid4().hex,
                 status="READY",
