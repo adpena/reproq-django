@@ -241,6 +241,7 @@ group_results, callback_result = chord(
     callback=notify_done,
 ).enqueue()
 ```
+The callback runs only after all group tasks succeed. Failed tasks leave the callback waiting.
 
 ---
 

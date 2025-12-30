@@ -133,6 +133,7 @@ process_invoice.enqueue(123, lock_key="invoice_123")</pre>
 
 chain(task_a, task_b, task_c).enqueue()</pre>
                 <p>Use <code>group</code> to enqueue tasks in parallel, or <code>chord</code> to run a callback after a group finishes.</p>
+                <p>The callback runs only after all group tasks succeed; failures leave it waiting.</p>
             </section>
 
             <section id="retries" class="mb-16 prose prose-slate max-w-none">
