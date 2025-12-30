@@ -54,14 +54,21 @@ TASKS = {
 }
 ```
 
-### 3. Install the Worker
-Reproq can automatically download or build the Go binary for you:
+### 3. Bootstrap (Recommended)
+Bootstrap writes a config file, installs the worker binary, and runs both migration steps:
+```bash
+python manage.py reproq init
+```
+Use `--format toml`, `--skip-install`, `--skip-migrate`, or `--skip-worker-migrate` if you need a lighter touch.
+
+### 4. Install the Worker (Standalone)
+If you want only the worker binary:
 ```bash
 python manage.py reproq install
 ```
 *This command detects your OS/Architecture and fetches the correct pre-built binary from GitHub. No Go installation required!*
 
-### 4. Run Migrations
+### 5. Run Migrations
 ```bash
 python manage.py reproq migrate-worker
 python manage.py migrate
@@ -72,6 +79,19 @@ python manage.py migrate
 ```bash
 python manage.py reproq worker
 ```
+
+---
+
+## 🧰 Management Commands
+
+Run `python manage.py reproq <subcommand>` to manage the worker and day-to-day ops.
+
+- **Bootstrap**: `init` writes `reproq.yaml`/`reproq.toml`, installs the worker, and runs migrations.
+- **Config**: `config --explain` prints the effective config and its precedence.
+- **Doctor**: `doctor --strict` validates DSN, schema, worker binary, and allowlist.
+- **Upgrade**: `upgrade` fetches the latest worker release and optionally runs `migrate-worker`.
+- **Allowlist**: `allowlist --write --config reproq.yaml` populates `allowed_task_modules`.
+- **Ops**: `status`/`stats`, `logs --id <result_id>`, `cancel --id <result_id>`.
 
 ---
 
@@ -196,6 +216,20 @@ TASKS = {
 }
 ```
 
+Worker config files (`reproq.yaml`/`reproq.toml`) are optional. Precedence is:
+defaults < config file < env vars < CLI flags. `--dsn` overrides `DATABASE_URL`, and
+`DATABASE_URL` is optional when flags or a config file are provided.
+
+---
+
+## 🧪 Development
+
+We standardize on Python 3.12.x for local development.
+
+```bash
+bash scripts/dev_bootstrap.sh
+```
+
 ---
 
 ## ⛓ Workflows (Chains & Groups)
@@ -301,13 +335,18 @@ The `python manage.py reproq` command is your Swiss Army knife.
 | `worker` | Starts the Go worker. Flags: `--config`, `--concurrency` (default 10), `--queues`, `--allowed-task-modules`, `--logs-dir`, `--payload-mode`, `--metrics-port`, `--metrics-addr`, `--metrics-auth-token`, `--metrics-allow-cidrs`, `--metrics-tls-cert`, `--metrics-tls-key`, `--metrics-tls-client-ca`. Auto-configures allow-list when unset (unless config file is used). |
 | `beat` | Starts the scheduler. Flags: `--config`, `--interval` (default 30s). |
 | `install` | Downloads/builds the worker binary. |
+| `upgrade` | Upgrades the worker binary and optionally runs `migrate-worker`. |
 | `migrate-worker` | Applies essential SQL schema optimizations (indexes, extensions). |
 | `check` | Validates binary path, DB connection, and schema health. |
-| `allowlist` | Prints `ALLOWED_TASK_MODULES` computed from discovered task modules. |
+| `doctor` | Validates DSN, schema, worker binary, and allowlist; `--strict` fails on warnings. |
+| `config` | Prints effective worker/beat config; use `--explain` for precedence. |
+| `allowlist` | Prints `ALLOWED_TASK_MODULES` or writes them to a config file with `--write`. |
+| `logs` | Prints logs for a task run using `logs_uri`. |
+| `cancel` | Requests cancellation of a task run by result ID. |
 | `reclaim` | Requeue or fail tasks with expired leases. |
 | `prune-workers` | Delete workers not seen recently. |
 | `prune-successful` | Delete successful task runs older than a cutoff. |
-| `stats` | Shows task counts by status and active workers. |
+| `stats` / `status` | Shows task counts by status and active workers. |
 | `systemd` | Generates systemd service files for production. |
 | `stress-test` | Enqueues dummy tasks for benchmarking. |
 
@@ -319,6 +358,7 @@ The Go worker/beat support YAML/TOML config files. `manage.py reproq worker` and
 will load a config file when `--config` or `REPROQ_CONFIG` is set. If no worker/beat flags are provided,
 they also look for `reproq.yaml`, `reproq.yml`, `reproq.toml`, `.reproq.yaml`, `.reproq.yml`, or `.reproq.toml`
 in the current working directory. CLI flags override config values; environment variables override config values too.
+`--dsn` always overrides `DATABASE_URL`, and `DATABASE_URL` is optional when a config file or flags are provided.
 
 See `reproq.example.yaml` and `reproq.example.toml` for full templates.
 
@@ -364,7 +404,7 @@ You can pass metrics flags (for example `--metrics-addr 127.0.0.1:9090`) or use 
 
 ### Env Vars
 The Go worker relies on standard environment variables:
-- `DATABASE_URL`: `postgres://user:pass@host:5432/db`
+- `DATABASE_URL`: `postgres://user:pass@host:5432/db` (optional if you provide `--dsn` or a config file)
 - `WORKER_ID`: (Optional) Unique name for the node.
 - `REPROQ_WORKER_BIN`: (Optional) Path to the binary if not using `manage.py reproq install`.
 - `REPROQ_CONFIG`: (Optional) Path to a YAML/TOML worker/beat config file.

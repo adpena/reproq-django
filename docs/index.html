@@ -104,6 +104,20 @@
 python manage.py migrate --noinput</pre>
             </section>
 
+            <section id="management" class="mb-16 prose prose-slate max-w-none">
+                <h2 class="text-3xl font-bold mb-6">Management Commands</h2>
+                <p>Run <code>python manage.py reproq &lt;subcommand&gt;</code> for worker lifecycle and ops.</p>
+                <ul>
+                    <li><strong>init</strong>: Write <code>reproq.yaml</code>/<code>reproq.toml</code>, install the worker, and run migrations.</li>
+                    <li><strong>doctor</strong>: Validate DSN, schema, worker binary, and allowlist health.</li>
+                    <li><strong>config --explain</strong>: Print the effective config with precedence.</li>
+                    <li><strong>upgrade</strong>: Fetch the latest worker release and run <code>migrate-worker</code>.</li>
+                    <li><strong>allowlist --write</strong>: Persist discovered task modules into the config file.</li>
+                    <li><strong>status / logs / cancel</strong>: Quick ops helpers for triage.</li>
+                </ul>
+                <p class="text-sm text-slate-600">Precedence: defaults &lt; config file &lt; env vars &lt; CLI flags. <code>--dsn</code> overrides <code>DATABASE_URL</code>.</p>
+            </section>
+
             <section id="architecture" class="mb-16 prose prose-slate max-w-none">
                 <h2 class="text-3xl font-bold mb-6">Architecture</h2>
                 <p>Reproq follows a "split-brain" architecture to maximize both developer productivity and runtime performance.</p>

@@ -59,7 +59,7 @@ sudo systemctl enable --now reproq-beat
 
 The Go worker needs access to your database. It respects the following:
 
-- `DATABASE_URL`: Standard PostgreSQL DSN (e.g., `postgres://user:pass@host:5432/dbname`).
+- `DATABASE_URL`: Standard PostgreSQL DSN (e.g., `postgres://user:pass@host:5432/dbname`). Optional if you provide `--dsn` or a config file with `dsn`.
 - `WORKER_ID`: Unique name for the worker node (defaults to hostname).
 - `PYTHONPATH`: Ensure your Django project is importable.
 - `REPROQ_WORKER_BIN`: Optional explicit path to the worker binary. If set, `python manage.py reproq install` writes the binary to this path.

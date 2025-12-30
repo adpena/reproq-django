@@ -7,6 +7,10 @@ import platform
 import shutil
 import urllib.request
 import tempfile
+import hashlib
+import json
+import tomllib
+import importlib.resources
 from datetime import timedelta
 from django.core.management.base import BaseCommand, CommandError
 from django.conf import settings
@@ -59,16 +63,38 @@ class Command(BaseCommand):
         install_parser.add_argument("--tag", type=str, default="latest", help="GitHub release tag")
 
         # Init
-        subparsers.add_parser("init", help="Bootstrap Reproq in the current project")
+        init_parser = subparsers.add_parser("init", help="Bootstrap Reproq in the current project")
+        init_parser.add_argument("--config", type=str, default="", help="Path to config file to write")
+        init_parser.add_argument("--format", choices=["yaml", "toml"], default="yaml", help="Config format")
+        init_parser.add_argument("--force", action="store_true", help="Overwrite existing config file")
+        init_parser.add_argument("--skip-install", action="store_true", help="Skip worker binary install")
+        init_parser.add_argument("--skip-migrate", action="store_true", help="Skip Django migrations")
+        init_parser.add_argument("--skip-worker-migrate", action="store_true", help="Skip worker SQL optimizations")
+        init_parser.add_argument("--source", type=str, help="Path to reproq-worker source")
+        init_parser.add_argument("--build", action="store_true", help="Force building from source")
+        init_parser.add_argument("--tag", type=str, default="latest", help="GitHub release tag")
 
         # Stats
         subparsers.add_parser("stats", help="Show task execution statistics")
+        subparsers.add_parser("status", help="Show task execution statistics (alias)")
 
         # Stress Test
         stress_parser = subparsers.add_parser("stress-test", help="Enqueue a large number of tasks for benchmarking")
         stress_parser.add_argument("--count", type=int, default=100, help="Number of tasks to enqueue")
         stress_parser.add_argument("--sleep", type=float, default=0, help="Time each task should sleep")
         stress_parser.add_argument("--bulk", action="store_true", help="Use bulk_enqueue")
+
+        # Doctor
+        doctor_parser = subparsers.add_parser("doctor", help="Validate configuration, schema, and worker binary")
+        doctor_parser.add_argument("--config", type=str, default="", help="Path to reproq config file")
+        doctor_parser.add_argument("--strict", action="store_true", help="Exit with error on warnings")
+
+        # Config
+        config_parser = subparsers.add_parser("config", help="Show effective worker/beat configuration")
+        config_parser.add_argument("--config", type=str, default="", help="Path to reproq config file")
+        config_parser.add_argument("--mode", choices=["worker", "beat", "all"], default="worker")
+        config_parser.add_argument("--explain", action="store_true", help="Explain config precedence")
+        config_parser.add_argument("--print", dest="print_config", action="store_true", help="Print effective config (default)")
 
         # Allowlist
         allowlist_parser = subparsers.add_parser(
@@ -86,6 +112,35 @@ class Command(BaseCommand):
             action="store_true",
             help="Print discovered task paths",
         )
+        allowlist_parser.add_argument(
+            "--write",
+            action="store_true",
+            help="Write allow-list to reproq config file",
+        )
+        allowlist_parser.add_argument(
+            "--config",
+            type=str,
+            default="",
+            help="Config file to update when using --write",
+        )
+
+        # Logs
+        logs_parser = subparsers.add_parser("logs", help="Show task logs from logs_uri")
+        logs_parser.add_argument("--id", type=int, required=True, help="Task result_id")
+        logs_parser.add_argument("--tail", type=int, default=200, help="Tail N lines from the log file")
+        logs_parser.add_argument("--max-bytes", type=int, default=1_000_000, help="Max bytes to read")
+        logs_parser.add_argument("--show-path", action="store_true", help="Only print logs_uri path")
+
+        # Cancel
+        cancel_parser = subparsers.add_parser("cancel", help="Request cancellation for a task run")
+        cancel_parser.add_argument("--id", type=int, required=True, help="Task result_id")
+
+        # Upgrade
+        upgrade_parser = subparsers.add_parser("upgrade", help="Upgrade the Go worker binary")
+        upgrade_parser.add_argument("--source", type=str, help="Path to reproq-worker source")
+        upgrade_parser.add_argument("--build", action="store_true", help="Force building from source")
+        upgrade_parser.add_argument("--tag", type=str, default="latest", help="GitHub release tag")
+        upgrade_parser.add_argument("--skip-worker-migrate", action="store_true", help="Skip worker SQL optimizations")
 
         # systemd
         systemd_parser = subparsers.add_parser("systemd", help="Generate systemd service files")
@@ -184,7 +239,15 @@ class Command(BaseCommand):
             self.run_check()
         elif subcommand == "init":
             self.run_init(options)
+        elif subcommand == "doctor":
+            self.run_doctor(options)
+        elif subcommand == "config":
+            self.run_config(options)
+        elif subcommand == "upgrade":
+            self.run_upgrade(options)
         elif subcommand == "stats":
+            self.run_stats()
+        elif subcommand == "status":
             self.run_stats()
         elif subcommand == "stress-test":
             self.run_stress_test(options)
@@ -196,6 +259,10 @@ class Command(BaseCommand):
             self.run_migrate()
         elif subcommand == "allowlist":
             self.run_allowlist(options)
+        elif subcommand == "logs":
+            self.run_logs(options)
+        elif subcommand == "cancel":
+            self.run_cancel(options)
         elif subcommand == "reclaim":
             self.run_reclaim(options)
         elif subcommand == "prune-workers":
@@ -243,9 +310,199 @@ class Command(BaseCommand):
             self.stderr.write(self.style.ERROR("❌ 'reproq_django' not found in INSTALLED_APPS."))
         else:
             self.stdout.write(self.style.SUCCESS("✅ 'reproq_django' is in INSTALLED_APPS."))
+        config_path = self._resolve_init_config_path(options)
+        if config_path:
+            created = self._ensure_config_file(
+                config_path,
+                options.get("format", "yaml"),
+                options.get("force", False),
+            )
+            if created:
+                self.stdout.write(self.style.SUCCESS(f"✅ Config written to {config_path}"))
+            else:
+                self.stdout.write(self.style.WARNING(f"Config already exists at {config_path}"))
 
-        self.run_install(options)
+        if not options.get("skip_install"):
+            self.run_install(options)
+
+        if not options.get("skip_worker_migrate"):
+            self.run_migrate()
+
+        if not options.get("skip_migrate"):
+            from django.core.management import call_command
+            call_command("migrate")
+
         self.stdout.write(self.style.MIGRATE_HEADING("\n✨ Reproq is ready!"))
+
+    def run_doctor(self, options):
+        strict = options.get("strict", False)
+        warnings = []
+        errors = []
+
+        def warn(message):
+            warnings.append(message)
+            self.stdout.write(self.style.WARNING(f"⚠️ {message}"))
+
+        def fail(message):
+            errors.append(message)
+            self.stderr.write(self.style.ERROR(f"❌ {message}"))
+
+        self.stdout.write(self.style.MIGRATE_HEADING("🔎 Reproq Doctor"))
+
+        if "reproq_django" not in settings.INSTALLED_APPS:
+            fail("'reproq_django' not found in INSTALLED_APPS.")
+        else:
+            self.stdout.write(self.style.SUCCESS("✅ 'reproq_django' is in INSTALLED_APPS."))
+
+        config_path = self._resolve_config_path(options.get("config"), True)
+        file_config = None
+        if config_path:
+            if not os.path.exists(config_path):
+                fail(f"Config file not found: {config_path}")
+            else:
+                try:
+                    file_config, config_format = self._load_config_file(config_path)
+                    self.stdout.write(
+                        self.style.SUCCESS(
+                            f"✅ Loaded config file ({config_format}): {config_path}"
+                        )
+                    )
+                except CommandError as exc:
+                    fail(str(exc))
+        else:
+            warn("No reproq config file found (using env/settings).")
+
+        env_config, env_errors = self._build_env_config()
+        for error in env_errors:
+            fail(error)
+
+        effective, sources = self._effective_config(file_config, env_config)
+        if not config_path:
+            settings_dsn = self.get_dsn()
+            if settings_dsn and not effective.get("dsn"):
+                self._apply_settings_dsn(effective, sources, settings_dsn, "settings")
+
+        worker_dsn = self._resolve_effective_dsn(effective, "worker")
+        if worker_dsn:
+            self.stdout.write(self.style.SUCCESS("✅ Worker DSN configured."))
+            self.stdout.write(f"Worker DSN: {self._mask_dsn(worker_dsn)}")
+        else:
+            fail("Worker DSN missing (use DATABASE_URL, settings, or config file).")
+
+        beat_dsn = self._resolve_effective_dsn(effective, "beat")
+        if beat_dsn:
+            self.stdout.write(self.style.SUCCESS("✅ Beat DSN configured."))
+        else:
+            warn("Beat DSN missing (periodic tasks will not run).")
+
+        worker_bin, resolved_bin, exists = self._resolve_worker_bin()
+        if not exists:
+            fail(
+                "Worker binary not found. Run `python manage.py reproq install` or set "
+                "REPROQ_WORKER_BIN."
+            )
+        else:
+            try:
+                version = subprocess.check_output([worker_bin, "--version"]).decode().strip()
+                self.stdout.write(self.style.SUCCESS(f"✅ Worker binary: {version}"))
+            except Exception as exc:
+                fail(f"Worker binary failed version check: {exc}")
+                if resolved_bin:
+                    self.stderr.write(self.style.ERROR(f"Resolved path: {resolved_bin}"))
+
+        try:
+            connection.ensure_connection()
+            self.stdout.write(self.style.SUCCESS("✅ Database connection ok."))
+        except Exception as exc:
+            fail(f"Database connection failed: {exc}")
+        else:
+            with connection.cursor() as cursor:
+                tables = set(connection.introspection.table_names(cursor))
+            required_tables = {
+                "task_runs",
+                "periodic_tasks",
+                "reproq_workers",
+                "rate_limits",
+                "workflow_runs",
+            }
+            missing = sorted(required_tables - tables)
+            if missing:
+                fail(
+                    "Reproq schema missing tables: "
+                    f"{', '.join(missing)} (run reproq migrate-worker + migrate)."
+                )
+            else:
+                self.stdout.write(self.style.SUCCESS("✅ Reproq schema present."))
+
+        allowlist = effective.get("worker", {}).get("allowed_task_modules", [])
+        if not allowlist:
+            auto_allowed, _, allow_errors = self._compute_allowed_task_modules()
+            if allow_errors:
+                warn("Some task modules failed to import while computing allowlist.")
+            if auto_allowed:
+                warn(
+                    "ALLOWED_TASK_MODULES not set; run "
+                    "`python manage.py reproq allowlist --write`."
+                )
+            else:
+                warn("No task modules discovered for allowlist.")
+        else:
+            self.stdout.write(self.style.SUCCESS("✅ ALLOWED_TASK_MODULES configured."))
+
+        logs_dir = effective.get("worker", {}).get("logs_dir", "")
+        if logs_dir and not os.path.isdir(logs_dir):
+            warn(f"Logs directory does not exist yet: {logs_dir}")
+
+        if errors or (strict and warnings):
+            summary = f"Doctor found {len(errors)} error(s) and {len(warnings)} warning(s)."
+            raise CommandError(summary)
+
+        self.stdout.write(self.style.SUCCESS("✨ Doctor completed with no blocking issues."))
+
+    def run_config(self, options):
+        config_path = self._resolve_config_path(options.get("config"), True)
+        if config_path and not os.path.exists(config_path):
+            raise CommandError(f"Config file not found: {config_path}")
+
+        file_config = None
+        config_format = ""
+        if config_path:
+            file_config, config_format = self._load_config_file(config_path)
+
+        env_config, env_errors = self._build_env_config()
+        if env_errors:
+            raise CommandError("; ".join(env_errors))
+
+        effective, sources = self._effective_config(file_config, env_config)
+        if not config_path:
+            settings_dsn = self.get_dsn()
+            if settings_dsn and not effective.get("dsn"):
+                self._apply_settings_dsn(effective, sources, settings_dsn, "settings")
+
+        mode = options.get("mode", "worker")
+        view = self._select_config_view(effective, mode)
+        masked = self._mask_config(view)
+
+        if config_path:
+            self.stdout.write(f"Config file: {config_path} ({config_format})")
+        else:
+            self.stdout.write("Config file: (none detected)")
+
+        self.stdout.write("Precedence: defaults < config file < env vars < CLI flags")
+        self.stdout.write(json.dumps(masked, indent=2))
+
+        if options.get("explain"):
+            self.stdout.write("\nSources:")
+            for path, value in self._flatten_config(view):
+                source = sources.get(path, "default")
+                masked_value = self._mask_value(path, value)
+                self.stdout.write(f"{path}: {masked_value} ({source})")
+
+    def run_upgrade(self, options):
+        self.stdout.write(self.style.MIGRATE_HEADING("Upgrading Reproq Go Worker..."))
+        self.run_install(options)
+        if not options.get("skip_worker_migrate"):
+            self.run_migrate()
 
     def run_install(self, options):
         self.stdout.write(self.style.MIGRATE_HEADING("Installing Reproq Go Worker..."))
@@ -288,6 +545,14 @@ class Command(BaseCommand):
                 with urllib.request.urlopen(url) as response:
                     with open(tmp_path, 'wb') as f:
                         shutil.copyfileobj(response, f)
+                checksum = self._download_checksum(url)
+                if checksum:
+                    actual = self._sha256_file(tmp_path)
+                    if actual != checksum:
+                        raise CommandError("Downloaded binary checksum mismatch.")
+                    self.stdout.write(self.style.SUCCESS("✅ Checksum verified."))
+                else:
+                    self.stdout.write(self.style.WARNING("Checksum not found; skipping verification."))
                 success = True
             except Exception as e:
                 self.stdout.write(self.style.WARNING(f"Download failed: {e}"))
@@ -885,10 +1150,74 @@ WantedBy=multi-user.target
             self.stdout.write(self.style.WARNING("No task modules discovered."))
             return
         allowed_value = ",".join(allowed)
+        if options.get("write"):
+            config_path = self._resolve_config_path(options.get("config"), True)
+            if not config_path:
+                raise CommandError(
+                    "Config file not found. Pass --config or run `python manage.py reproq init`."
+                )
+            if not os.path.exists(config_path):
+                raise CommandError(f"Config file not found: {config_path}")
+            config_data, config_format = self._load_config_file(config_path)
+            config_data.setdefault("worker", {})["allowed_task_modules"] = allowed
+            self._write_config_file(config_path, config_data, config_format)
+            self.stdout.write(
+                self.style.SUCCESS(f"✅ Updated allowlist in {config_path}")
+            )
         if options.get("format") == "plain":
             self.stdout.write(allowed_value)
         else:
             self.stdout.write(f"ALLOWED_TASK_MODULES={allowed_value}")
+
+    def run_logs(self, options):
+        result_id = options["id"]
+        try:
+            run = TaskRun.objects.get(result_id=result_id)
+        except TaskRun.DoesNotExist as exc:
+            raise CommandError(f"Task run {result_id} not found.") from exc
+
+        logs_uri = (run.logs_uri or "").strip()
+        if not logs_uri:
+            self.stdout.write("No logs_uri recorded for this task run.")
+            return
+        if options.get("show_path"):
+            self.stdout.write(logs_uri)
+            return
+
+        max_bytes = options.get("max_bytes", 1_000_000)
+        if max_bytes <= 0:
+            raise CommandError("--max-bytes must be positive.")
+
+        data = self._read_logs_uri(logs_uri, max_bytes)
+        lines = data.splitlines()
+        tail = options.get("tail", 0)
+        if tail and tail > 0:
+            lines = lines[-tail:]
+        if lines:
+            self.stdout.write("\n".join(lines))
+        else:
+            self.stdout.write("(no log output)")
+
+    def run_cancel(self, options):
+        result_id = options["id"]
+        try:
+            run = TaskRun.objects.get(result_id=result_id)
+        except TaskRun.DoesNotExist as exc:
+            raise CommandError(f"Task run {result_id} not found.") from exc
+
+        if run.cancel_requested:
+            self.stdout.write(self.style.WARNING("Cancel already requested."))
+        else:
+            run.cancel_requested = True
+            run.save(update_fields=["cancel_requested"])
+            self.stdout.write(self.style.SUCCESS("Cancel requested."))
+
+        if run.status in ("SUCCESSFUL", "FAILED", "CANCELLED"):
+            self.stdout.write(
+                self.style.WARNING(
+                    f"Task is already {run.status}; worker may not cancel it."
+                )
+            )
 
     def run_stats(self):
         from reproq_django.models import TaskRun, Worker
@@ -1047,6 +1376,24 @@ WantedBy=multi-user.target
         user_part = f"{user}@" if user else ""
         return f"{parsed.scheme}://{user_part}{host}{port}/{db}"
 
+    def _sha256_file(self, path):
+        h = hashlib.sha256()
+        with open(path, "rb") as f:
+            for chunk in iter(lambda: f.read(1024 * 1024), b""):
+                h.update(chunk)
+        return h.hexdigest()
+
+    def _download_checksum(self, url):
+        checksum_url = f"{url}.sha256"
+        try:
+            with urllib.request.urlopen(checksum_url) as response:
+                payload = response.read().decode().strip()
+        except Exception:
+            return ""
+        if not payload:
+            return ""
+        return payload.split()[0]
+
     def _render_env(self, key, value):
         escaped = str(value).replace('"', '\\"')
         return f'Environment="{key}={escaped}"'
@@ -1132,3 +1479,432 @@ WantedBy=multi-user.target
     def _report_allowlist_errors(self, errors):
         for message in errors:
             self.stderr.write(self.style.WARNING(message))
+
+    def _resolve_init_config_path(self, options):
+        if options.get("config"):
+            return os.path.abspath(os.path.expanduser(options["config"]))
+        fmt = options.get("format", "yaml")
+        filename = "reproq.yaml" if fmt == "yaml" else "reproq.toml"
+        return os.path.join(os.getcwd(), filename)
+
+    def _ensure_config_file(self, path, fmt, force):
+        path = os.path.abspath(os.path.expanduser(path))
+        if os.path.exists(path) and not force:
+            return False
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+        template = self._load_config_template(fmt)
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write(template)
+        return True
+
+    def _load_config_template(self, fmt):
+        filename = f"reproq.example.{fmt}"
+        candidates = [os.path.join(os.getcwd(), filename)]
+        repo_root = os.path.abspath(
+            os.path.join(os.path.dirname(os.path.abspath(__file__)), "../../../../")
+        )
+        candidates.append(os.path.join(repo_root, filename))
+        for candidate in candidates:
+            if os.path.exists(candidate):
+                with open(candidate, "r", encoding="utf-8") as handle:
+                    return handle.read()
+        try:
+            resource = importlib.resources.files("reproq_django.resources").joinpath(filename)
+            return resource.read_text(encoding="utf-8")
+        except Exception:
+            return self._fallback_config_template(fmt)
+
+    def _fallback_config_template(self, fmt):
+        if fmt == "toml":
+            return (
+                'dsn = "postgres://user:pass@localhost:5432/reproq?sslmode=disable"\n'
+                "\n"
+                "[worker]\n"
+                "queues = [\"default\"]\n"
+                "concurrency = 10\n"
+                "\n"
+                "[beat]\n"
+                "interval = \"30s\"\n"
+            )
+        return (
+            'dsn: "postgres://user:pass@localhost:5432/reproq?sslmode=disable"\n'
+            "worker:\n"
+            "  queues:\n"
+            "    - default\n"
+            "  concurrency: 10\n"
+            "beat:\n"
+            "  interval: \"30s\"\n"
+        )
+
+    def _load_config_file(self, path):
+        ext = os.path.splitext(path)[1].lower()
+        if ext in (".yaml", ".yml"):
+            fmt = "yaml"
+            try:
+                import yaml
+            except Exception as exc:
+                raise CommandError(
+                    "PyYAML is required to read YAML config files. "
+                    "Install pyyaml or use TOML."
+                ) from exc
+            with open(path, "r", encoding="utf-8") as handle:
+                data = yaml.safe_load(handle) or {}
+        elif ext == ".toml":
+            fmt = "toml"
+            with open(path, "rb") as handle:
+                data = tomllib.load(handle)
+        else:
+            raise CommandError(f"Unsupported config extension: {ext}")
+
+        if not isinstance(data, dict):
+            raise CommandError("Config file must be a mapping at the top level.")
+        return data, fmt
+
+    def _write_config_file(self, path, data, fmt):
+        if fmt == "yaml":
+            try:
+                import yaml
+            except Exception as exc:
+                raise CommandError(
+                    "PyYAML is required to write YAML config files. "
+                    "Install pyyaml or use TOML."
+                ) from exc
+            payload = yaml.safe_dump(
+                data,
+                sort_keys=False,
+                default_flow_style=False,
+                allow_unicode=False,
+            )
+        elif fmt == "toml":
+            payload = self._toml_dumps(data)
+        else:
+            raise CommandError(f"Unsupported config format: {fmt}")
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write(payload)
+
+    def _toml_dumps(self, data):
+        lines = []
+
+        def emit_section(section, prefix):
+            simple_items = []
+            nested_items = []
+            for key, value in section.items():
+                if isinstance(value, dict):
+                    nested_items.append((key, value))
+                else:
+                    simple_items.append((key, value))
+            if prefix:
+                lines.append("")
+                lines.append(f"[{'.'.join(prefix)}]")
+            for key, value in simple_items:
+                lines.append(f"{key} = {self._toml_format(value)}")
+            for key, value in nested_items:
+                emit_section(value, prefix + [key])
+
+        emit_section(data, [])
+        return "\n".join(lines).rstrip() + "\n"
+
+    def _toml_format(self, value):
+        if isinstance(value, bool):
+            return "true" if value else "false"
+        if isinstance(value, (int, float)):
+            return str(value)
+        if value is None:
+            return '""'
+        if isinstance(value, list):
+            inner = ", ".join(self._toml_format(item) for item in value)
+            return f"[{inner}]"
+        return json.dumps(str(value))
+
+    def _default_config(self):
+        hostname = platform.node() or "worker"
+        worker_id = f"{hostname}-{os.getpid()}"
+        return {
+            "dsn": "",
+            "worker": {
+                "dsn": "",
+                "worker_id": worker_id,
+                "queues": ["default"],
+                "allowed_task_modules": [],
+                "concurrency": 10,
+                "poll_min_backoff": "100ms",
+                "poll_max_backoff": "5s",
+                "lease_seconds": 300,
+                "heartbeat_seconds": 60,
+                "reclaim_interval_seconds": 60,
+                "python_bin": "python3",
+                "executor_module": "reproq_django.executor",
+                "payload_mode": "stdin",
+                "max_payload_bytes": 1048576,
+                "max_stdout_bytes": 1048576,
+                "max_stderr_bytes": 1048576,
+                "logs_dir": "",
+                "exec_timeout": "1h",
+                "max_attempts_default": 3,
+                "shutdown_timeout": "30s",
+                "health_addr": ":8080",
+                "priority_aging_factor": 60,
+            },
+            "beat": {
+                "dsn": "",
+                "interval": "30s",
+            },
+            "metrics": {
+                "addr": "",
+                "port": 0,
+                "auth_token": "",
+                "allow_cidrs": [],
+                "auth_limit": 30,
+                "auth_window": "1m",
+                "auth_max_entries": 1000,
+                "tls_cert": "",
+                "tls_key": "",
+                "tls_client_ca": "",
+            },
+        }
+
+    def _effective_config(self, file_config, env_config):
+        config = self._default_config()
+        sources = {}
+        self._set_default_sources(config, sources, "default")
+        if file_config:
+            self._merge_config(config, file_config, "config", sources)
+        if env_config:
+            self._merge_config(config, env_config, "env", sources)
+        return config, sources
+
+    def _build_env_config(self):
+        errors = []
+        config = {}
+
+        def set_path(path, value):
+            node = config
+            for key in path[:-1]:
+                node = node.setdefault(key, {})
+            node[path[-1]] = value
+
+        def parse_int(value, name, positive=True):
+            try:
+                parsed = int(value)
+            except Exception:
+                errors.append(f"Invalid {name}: {value}")
+                return None
+            if positive and parsed <= 0:
+                errors.append(f"Invalid {name}: must be positive")
+                return None
+            return parsed
+
+        def parse_float(value, name):
+            try:
+                return float(value)
+            except Exception:
+                errors.append(f"Invalid {name}: {value}")
+                return None
+
+        if os.environ.get("DATABASE_URL"):
+            dsn = os.environ["DATABASE_URL"]
+            set_path(["dsn"], dsn)
+            set_path(["worker", "dsn"], dsn)
+            set_path(["beat", "dsn"], dsn)
+
+        if os.environ.get("WORKER_ID"):
+            set_path(["worker", "worker_id"], os.environ["WORKER_ID"])
+
+        if os.environ.get("QUEUE_NAMES"):
+            set_path(
+                ["worker", "queues"],
+                self._parse_comma_list(os.environ["QUEUE_NAMES"]),
+            )
+
+        if os.environ.get("ALLOWED_TASK_MODULES"):
+            set_path(
+                ["worker", "allowed_task_modules"],
+                self._parse_comma_list(os.environ["ALLOWED_TASK_MODULES"]),
+            )
+
+        if os.environ.get("REPROQ_LOGS_DIR"):
+            set_path(["worker", "logs_dir"], os.environ["REPROQ_LOGS_DIR"])
+
+        if os.environ.get("HEALTH_ADDR"):
+            set_path(["worker", "health_addr"], os.environ["HEALTH_ADDR"])
+
+        if os.environ.get("PRIORITY_AGING_FACTOR"):
+            value = parse_float(os.environ["PRIORITY_AGING_FACTOR"], "PRIORITY_AGING_FACTOR")
+            if value is not None:
+                set_path(["worker", "priority_aging_factor"], value)
+
+        if os.environ.get("METRICS_ADDR"):
+            set_path(["metrics", "addr"], os.environ["METRICS_ADDR"])
+
+        if os.environ.get("METRICS_AUTH_TOKEN"):
+            set_path(["metrics", "auth_token"], os.environ["METRICS_AUTH_TOKEN"])
+
+        if os.environ.get("METRICS_ALLOW_CIDRS"):
+            set_path(
+                ["metrics", "allow_cidrs"],
+                self._parse_comma_list(os.environ["METRICS_ALLOW_CIDRS"]),
+            )
+
+        if os.environ.get("METRICS_AUTH_LIMIT"):
+            value = parse_int(os.environ["METRICS_AUTH_LIMIT"], "METRICS_AUTH_LIMIT")
+            if value is not None:
+                set_path(["metrics", "auth_limit"], value)
+
+        if os.environ.get("METRICS_AUTH_WINDOW"):
+            set_path(["metrics", "auth_window"], os.environ["METRICS_AUTH_WINDOW"])
+
+        if os.environ.get("METRICS_AUTH_MAX_ENTRIES"):
+            value = parse_int(
+                os.environ["METRICS_AUTH_MAX_ENTRIES"],
+                "METRICS_AUTH_MAX_ENTRIES",
+            )
+            if value is not None:
+                set_path(["metrics", "auth_max_entries"], value)
+
+        if os.environ.get("METRICS_TLS_CERT"):
+            set_path(["metrics", "tls_cert"], os.environ["METRICS_TLS_CERT"])
+
+        if os.environ.get("METRICS_TLS_KEY"):
+            set_path(["metrics", "tls_key"], os.environ["METRICS_TLS_KEY"])
+
+        if os.environ.get("METRICS_TLS_CLIENT_CA"):
+            set_path(["metrics", "tls_client_ca"], os.environ["METRICS_TLS_CLIENT_CA"])
+
+        return config, errors
+
+    def _parse_comma_list(self, value):
+        return [item.strip() for item in value.split(",") if item.strip()]
+
+    def _merge_config(self, base, incoming, source, sources, prefix=""):
+        for key, value in incoming.items():
+            path = f"{prefix}{key}"
+            if isinstance(value, dict):
+                if key not in base or not isinstance(base.get(key), dict):
+                    base[key] = {}
+                if value:
+                    self._merge_config(base[key], value, source, sources, path + ".")
+                elif key not in sources:
+                    sources[path] = source
+                continue
+
+            if key not in base:
+                base[key] = value
+                sources[path] = source
+                continue
+
+            if value is None:
+                continue
+            if isinstance(value, str):
+                if value == "":
+                    continue
+                base[key] = value
+                sources[path] = source
+                continue
+            if isinstance(value, list):
+                if not value:
+                    continue
+                base[key] = value
+                sources[path] = source
+                continue
+            base[key] = value
+            sources[path] = source
+
+    def _set_default_sources(self, config, sources, source, prefix=""):
+        for key, value in config.items():
+            path = f"{prefix}{key}"
+            if isinstance(value, dict):
+                self._set_default_sources(value, sources, source, path + ".")
+            else:
+                sources[path] = source
+
+    def _apply_settings_dsn(self, config, sources, dsn, source):
+        config["dsn"] = dsn
+        config.setdefault("worker", {})["dsn"] = dsn
+        config.setdefault("beat", {})["dsn"] = dsn
+        sources["dsn"] = source
+        sources["worker.dsn"] = source
+        sources["beat.dsn"] = source
+
+    def _resolve_effective_dsn(self, config, scope):
+        if scope == "worker":
+            return config.get("worker", {}).get("dsn") or config.get("dsn")
+        if scope == "beat":
+            return config.get("beat", {}).get("dsn") or config.get("dsn")
+        return config.get("dsn")
+
+    def _select_config_view(self, config, mode):
+        if mode == "worker":
+            return {
+                "dsn": config.get("dsn", ""),
+                "worker": config.get("worker", {}),
+                "metrics": config.get("metrics", {}),
+            }
+        if mode == "beat":
+            return {
+                "dsn": config.get("dsn", ""),
+                "beat": config.get("beat", {}),
+            }
+        return config
+
+    def _mask_config(self, config):
+        if isinstance(config, dict):
+            return {
+                key: self._mask_config(value)
+                if isinstance(value, (dict, list))
+                else self._mask_value(key, value)
+                for key, value in config.items()
+            }
+        if isinstance(config, list):
+            return [self._mask_config(value) for value in config]
+        return config
+
+    def _mask_value(self, path, value):
+        if value is None:
+            return value
+        lowered = path.lower()
+        if "dsn" in lowered and isinstance(value, str):
+            return self._mask_dsn(value) if value else value
+        if "auth_token" in lowered or lowered.endswith("token"):
+            return "<redacted>" if value else value
+        return value
+
+    def _flatten_config(self, config, prefix=""):
+        items = []
+        if isinstance(config, dict):
+            for key, value in config.items():
+                path = f"{prefix}{key}"
+                if isinstance(value, dict):
+                    items.extend(self._flatten_config(value, path + "."))
+                else:
+                    items.append((path, value))
+        else:
+            items.append((prefix.rstrip("."), config))
+        return items
+
+    def _read_logs_uri(self, logs_uri, max_bytes):
+        if os.path.exists(logs_uri):
+            path = logs_uri
+        else:
+            from urllib.parse import urlparse
+            from urllib.request import url2pathname
+
+            parsed = urlparse(logs_uri)
+            if parsed.scheme in ("", "file"):
+                path = url2pathname(parsed.path)
+            elif parsed.scheme in ("http", "https"):
+                with urllib.request.urlopen(logs_uri) as response:
+                    data = response.read(max_bytes)
+                return data.decode("utf-8", errors="replace")
+            else:
+                raise CommandError(f"Unsupported logs_uri scheme: {parsed.scheme}")
+
+        if not os.path.exists(path):
+            raise CommandError(f"Log path not found: {path}")
+
+        size = os.path.getsize(path)
+        read_size = min(size, max_bytes)
+        with open(path, "rb") as handle:
+            if read_size < size:
+                handle.seek(-read_size, os.SEEK_END)
+            data = handle.read(read_size)
+        return data.decode("utf-8", errors="replace")

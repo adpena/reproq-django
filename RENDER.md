@@ -62,7 +62,7 @@ If you use periodic tasks, you need exactly one instance of the `beat` process. 
 
 ## 4. Environment Variables
 Ensure the following variables are set in your Render environment:
-- `DATABASE_URL`: Required for the Go worker to connect to PostgreSQL.
+- `DATABASE_URL`: Required unless you supply `--dsn` or a config file with `dsn`.
 - `REPROQ_WORKER_BIN`: (Optional) Defaults to `src/reproq_django/bin/reproq`.
 - `ALLOWED_TASK_MODULES`: (Optional) Allow-list for task module prefixes. If unset, `python manage.py reproq worker` auto-configures it from discovered task modules.
 - `REPROQ_LOGS_DIR`: (Optional) Directory to persist worker stdout/stderr logs (updates `task_runs.logs_uri`).
