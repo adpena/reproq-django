@@ -1,13 +1,18 @@
 import os
+import re
 import subprocess
 import sys
 import platform
 import shutil
 import urllib.request
 import tempfile
+from datetime import timedelta
 from django.core.management.base import BaseCommand, CommandError
 from django.conf import settings
 from django.db import connection
+from django.db.models import Q
+from django.utils import timezone
+from ...models import TaskRun
 
 class Command(BaseCommand):
     help = "Unified Reproq management command"
@@ -55,6 +60,39 @@ class Command(BaseCommand):
         systemd_parser.add_argument("--group", type=str, help="Group to run as")
         systemd_parser.add_argument("--concurrency", type=int, default=10)
 
+        # Reclaim
+        reclaim_parser = subparsers.add_parser(
+            "reclaim",
+            help="Reclaim or fail tasks with expired leases",
+        )
+        reclaim_parser.add_argument(
+            "--action",
+            choices=["requeue", "fail"],
+            default="requeue",
+            help="What to do with expired leases",
+        )
+        reclaim_parser.add_argument(
+            "--older-than",
+            default="0s",
+            help="Only target leases expired longer than this (e.g., 5m, 1h)",
+        )
+        reclaim_parser.add_argument(
+            "--limit",
+            type=int,
+            default=0,
+            help="Maximum number of tasks to process (0 = no limit)",
+        )
+        reclaim_parser.add_argument(
+            "--dry-run",
+            action="store_true",
+            help="Show what would be reclaimed without making changes",
+        )
+        reclaim_parser.add_argument(
+            "--include-null-lease",
+            action="store_true",
+            help="Also target RUNNING tasks with no lease timestamp",
+        )
+
     def handle(self, *args, **options):
         subcommand = options["subcommand"]
         
@@ -72,6 +110,8 @@ class Command(BaseCommand):
             self.run_install(options)
         elif subcommand == "migrate-worker":
             self.run_migrate()
+        elif subcommand == "reclaim":
+            self.run_reclaim(options)
         elif subcommand in ["worker", "beat"]:
             self.run_worker_or_beat(subcommand, options)
 
@@ -231,6 +271,101 @@ WantedBy=multi-user.target
             service_name = f"reproq-{name}-{project_name}.service"
             with open(service_name, "w") as f: f.write(content)
             self.stdout.write(f"Generated {service_name}")
+
+    def _parse_duration(self, value: str) -> timedelta:
+        if not value:
+            return timedelta(0)
+        match = re.match(r"^\s*(\d+)\s*([smhd])\s*$", value)
+        if not match:
+            raise CommandError(
+                "Invalid duration. Use formats like 30s, 5m, 2h, 1d."
+            )
+        count = int(match.group(1))
+        unit = match.group(2)
+        if unit == "s":
+            return timedelta(seconds=count)
+        if unit == "m":
+            return timedelta(minutes=count)
+        if unit == "h":
+            return timedelta(hours=count)
+        if unit == "d":
+            return timedelta(days=count)
+        raise CommandError("Invalid duration unit.")
+
+    def run_reclaim(self, options):
+        now = timezone.now()
+        older_than = self._parse_duration(options["older_than"])
+        cutoff = now - older_than
+
+        lease_filter = Q(leased_until__lt=cutoff)
+        if options["include_null_lease"]:
+            lease_filter |= Q(leased_until__isnull=True)
+
+        queryset = TaskRun.objects.filter(
+            status="RUNNING",
+            cancel_requested=False,
+        ).filter(lease_filter)
+
+        if options["limit"] and options["limit"] > 0:
+            ids = list(
+                queryset.order_by("leased_until", "result_id")
+                .values_list("result_id", flat=True)[: options["limit"]]
+            )
+            queryset = TaskRun.objects.filter(result_id__in=ids)
+
+        count = queryset.count()
+        if options["dry_run"]:
+            self.stdout.write(
+                self.style.WARNING(f"Dry run: {count} task(s) match reclaim criteria.")
+            )
+            return
+
+        if count == 0:
+            self.stdout.write(self.style.SUCCESS("No expired leases found."))
+            return
+
+        action = options["action"]
+        if action == "requeue":
+            updated = queryset.update(
+                status="READY",
+                run_after=now,
+                leased_until=None,
+                leased_by=None,
+                started_at=None,
+                finished_at=None,
+            )
+            self.stdout.write(self.style.SUCCESS(f"Requeued {updated} task(s)."))
+            return
+
+        failures = 0
+        for run in queryset:
+            errors = list(run.errors_json or [])
+            errors.append(
+                {
+                    "at": now.isoformat(),
+                    "kind": "reclaim",
+                    "message": "Lease expired; marking task failed.",
+                }
+            )
+            run.status = "FAILED"
+            run.finished_at = now
+            run.last_attempted_at = now
+            run.leased_until = None
+            run.leased_by = None
+            run.errors_json = errors
+            run.save(
+                update_fields=[
+                    "status",
+                    "finished_at",
+                    "last_attempted_at",
+                    "leased_until",
+                    "leased_by",
+                    "errors_json",
+                ]
+            )
+            failures += 1
+
+        self.stdout.write(self.style.SUCCESS(f"Marked {failures} task(s) failed."))
 
     def run_migrate(self):
         # Go specific optimizations (e.g. creating extensions)

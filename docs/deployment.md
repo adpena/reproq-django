@@ -76,6 +76,15 @@ python manage.py reproq worker --concurrency 50
 
 **CRITICAL**: Only run **one instance** of the `beat` process per database. Running multiple instances will result in tasks being scheduled multiple times.
 
+## 4a. Reclaiming Orphaned Tasks
+
+If a worker dies while holding a lease, tasks can remain stuck in `RUNNING`.
+Use the reclaim command to requeue or fail those stale tasks:
+
+```bash
+python manage.py reproq reclaim --older-than 5m --action requeue
+```
+
 ## 5. Reverse Proxy & Admin
 
 The Reproq Admin uses standard Django Admin templates. Ensure your static files are collected and served correctly:

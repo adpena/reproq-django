@@ -17,6 +17,27 @@ def format_json(field_data):
     res = json.dumps(field_data, indent=2, sort_keys=True)
     return mark_safe(f"<pre>{res}</pre>")
 
+class LeaseStatusFilter(admin.SimpleListFilter):
+    title = "Lease"
+    parameter_name = "lease_status"
+
+    def lookups(self, request, model_admin):
+        return (
+            ("stale", "Stale (expired)"),
+            ("active", "Active"),
+            ("none", "None"),
+        )
+
+    def queryset(self, request, queryset):
+        now = timezone.now()
+        if self.value() == "stale":
+            return queryset.filter(status="RUNNING", leased_until__lt=now)
+        if self.value() == "active":
+            return queryset.filter(status="RUNNING", leased_until__gte=now)
+        if self.value() == "none":
+            return queryset.filter(status="RUNNING", leased_until__isnull=True)
+        return queryset
+
 @admin.register(Worker)
 class WorkerAdmin(admin.ModelAdmin):
     list_display = ("worker_id", "hostname_display", "concurrency", "queues", "status_icon", "last_seen_at")
@@ -45,10 +66,10 @@ class PeriodicTaskAdmin(admin.ModelAdmin):
 @admin.register(TaskRun)
 class TaskRunAdmin(admin.ModelAdmin):
     list_display = (
-        "result_id", "status_badge", "lock_key", "queue_name", "priority", 
+        "result_id", "status_badge", "lease_status", "lock_key", "queue_name", "priority", 
         "enqueued_at", "duration", "attempts_display", "workflow_info"
     )
-    list_filter = ("status", "queue_name", "backend_alias")
+    list_filter = ("status", LeaseStatusFilter, "queue_name", "backend_alias")
     search_fields = ("result_id", "spec_hash", "leased_by", "lock_key", "workflow_id")
     
     def workflow_info(self, obj):
@@ -96,6 +117,16 @@ class TaskRunAdmin(admin.ModelAdmin):
             color, obj.status
         )
     status_badge.short_description = "Status"
+
+    def lease_status(self, obj):
+        if obj.status != "RUNNING":
+            return "-"
+        if not obj.leased_until:
+            return format_html('<b style="color: #9e9e9e;">NONE</b>')
+        if obj.leased_until < timezone.now():
+            return format_html('<b style="color: #d32f2f;">STALE</b>')
+        return format_html('<b style="color: #2e7d32;">ACTIVE</b>')
+    lease_status.short_description = "Lease"
 
     def duration(self, obj):
         if obj.started_at and obj.finished_at:
