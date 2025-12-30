@@ -185,7 +185,7 @@ def send_welcome_email(user_id, **_kwargs):
 
             <section id="rate-limits" class="mb-16 prose prose-slate max-w-none">
                 <h2 class="text-3xl font-bold mb-6">Rate Limiting</h2>
-                <p>Reproq Worker enforces token bucket limits stored in the <code>rate_limits</code> table. Configure limits in the Django Admin or via the worker CLI.</p>
+                <p>Reproq Worker enforces token bucket limits stored in the <code>rate_limits</code> table. Limits are disabled by default; configure them in the Django Admin or via the worker CLI.</p>
                 <ul>
                     <li><strong>queue:&lt;queue_name&gt;</strong>: Limit a queue.</li>
                     <li><strong>task:&lt;task_path&gt;</strong>: Limit a task (overrides queue/global).</li>

@@ -270,6 +270,7 @@ Example:
 ```bash
 reproq limit set --key queue:default --rate 5 --burst 10
 ```
+Defaults: global rate limiting is disabled until you set a positive rate.
 
 ---
 
