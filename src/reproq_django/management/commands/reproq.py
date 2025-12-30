@@ -93,6 +93,42 @@ class Command(BaseCommand):
             help="Also target RUNNING tasks with no lease timestamp",
         )
 
+        prune_workers = subparsers.add_parser(
+            "prune-workers",
+            help="Delete workers not seen recently",
+        )
+        prune_workers.add_argument(
+            "--older-than",
+            default="10m",
+            help="Delete workers older than this (e.g., 10m, 1h, 1d)",
+        )
+        prune_workers.add_argument(
+            "--dry-run",
+            action="store_true",
+            help="Show how many workers would be deleted",
+        )
+
+        prune_successful = subparsers.add_parser(
+            "prune-successful",
+            help="Delete successful task runs older than a cutoff",
+        )
+        prune_successful.add_argument(
+            "--older-than",
+            default="7d",
+            help="Delete tasks older than this (e.g., 7d, 30d)",
+        )
+        prune_successful.add_argument(
+            "--limit",
+            type=int,
+            default=0,
+            help="Maximum number of tasks to delete (0 = no limit)",
+        )
+        prune_successful.add_argument(
+            "--dry-run",
+            action="store_true",
+            help="Show how many tasks would be deleted",
+        )
+
     def handle(self, *args, **options):
         subcommand = options["subcommand"]
         
@@ -112,6 +148,10 @@ class Command(BaseCommand):
             self.run_migrate()
         elif subcommand == "reclaim":
             self.run_reclaim(options)
+        elif subcommand == "prune-workers":
+            self.run_prune_workers(options)
+        elif subcommand == "prune-successful":
+            self.run_prune_successful(options)
         elif subcommand in ["worker", "beat"]:
             self.run_worker_or_beat(subcommand, options)
 
@@ -367,6 +407,34 @@ WantedBy=multi-user.target
 
         self.stdout.write(self.style.SUCCESS(f"Marked {failures} task(s) failed."))
 
+    def run_prune_workers(self, options):
+        from reproq_django.models import Worker
+        cutoff = timezone.now() - self._parse_duration(options["older_than"])
+        queryset = Worker.objects.filter(last_seen_at__lt=cutoff)
+        count = queryset.count()
+        if options["dry_run"]:
+            self.stdout.write(self.style.WARNING(f"Dry run: {count} worker(s) would be deleted."))
+            return
+        queryset.delete()
+        self.stdout.write(self.style.SUCCESS(f"Deleted {count} stale worker(s)."))
+
+    def run_prune_successful(self, options):
+        from reproq_django.models import TaskRun
+        cutoff = timezone.now() - self._parse_duration(options["older_than"])
+        queryset = TaskRun.objects.filter(status="SUCCESSFUL", finished_at__lt=cutoff)
+        if options["limit"] and options["limit"] > 0:
+            ids = list(
+                queryset.order_by("finished_at", "result_id")
+                .values_list("result_id", flat=True)[: options["limit"]]
+            )
+            queryset = TaskRun.objects.filter(result_id__in=ids)
+        count = queryset.count()
+        if options["dry_run"]:
+            self.stdout.write(self.style.WARNING(f"Dry run: {count} task(s) would be deleted."))
+            return
+        queryset.delete()
+        self.stdout.write(self.style.SUCCESS(f"Deleted {count} successful task(s)."))
+
     def run_migrate(self):
         # Go specific optimizations (e.g. creating extensions)
         self.stdout.write("Applying worker-specific optimizations...")
@@ -378,7 +446,7 @@ WantedBy=multi-user.target
                 self.stderr.write(self.style.WARNING(f"⚠️ Could not enable pgcrypto: {e}"))
         with connection.cursor() as cursor:
             tables = set(connection.introspection.table_names(cursor))
-        required_tables = {"task_runs", "periodic_tasks", "reproq_workers", "rate_limits"}
+        required_tables = {"task_runs", "periodic_tasks", "reproq_workers", "rate_limits", "workflow_runs"}
         missing_tables = sorted(required_tables - tables)
         if not missing_tables:
             self.stdout.write(self.style.SUCCESS("✅ Reproq schema already present."))
@@ -490,8 +558,24 @@ WantedBy=multi-user.target
             """,
             """
             INSERT INTO rate_limits (key, tokens_per_second, burst_size, current_tokens)
-            VALUES ('global', 100, 200, 200)
+            VALUES ('global', 0, 1, 0)
             ON CONFLICT (key) DO NOTHING;
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS workflow_runs (
+                workflow_id UUID PRIMARY KEY,
+                expected_count INTEGER NOT NULL,
+                success_count INTEGER NOT NULL DEFAULT 0,
+                failure_count INTEGER NOT NULL DEFAULT 0,
+                callback_result_id BIGINT,
+                status TEXT NOT NULL DEFAULT 'RUNNING',
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            );
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_workflow_runs_callback
+            ON workflow_runs (callback_result_id);
             """,
         ]
         with connection.cursor() as cursor:

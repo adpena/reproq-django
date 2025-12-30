@@ -242,6 +242,7 @@ group_results, callback_result = chord(
 ).enqueue()
 ```
 The callback runs only after all group tasks succeed. Failed tasks leave the callback waiting.
+Failures mark the workflow as failed and the callback will not run.
 
 ---
 
@@ -287,6 +288,8 @@ The `python manage.py reproq` command is your Swiss Army knife.
 | `migrate-worker` | Applies essential SQL schema optimizations (indexes, extensions). |
 | `check` | Validates binary path, DB connection, and schema health. |
 | `reclaim` | Requeue or fail tasks with expired leases. |
+| `prune-workers` | Delete workers not seen recently. |
+| `prune-successful` | Delete successful task runs older than a cutoff. |
 | `stats` | Shows task counts by status and active workers. |
 | `systemd` | Generates systemd service files for production. |
 | `stress-test` | Enqueues dummy tasks for benchmarking. |

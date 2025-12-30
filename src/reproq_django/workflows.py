@@ -1,8 +1,9 @@
 import uuid
 from typing import List, Any, Tuple
+from django.utils import timezone
 from django.tasks import Task
 from .proxy import TaskResultProxy
-from .models import TaskRun
+from .models import TaskRun, WorkflowRun
 
 class Chain:
     """
@@ -141,6 +142,7 @@ class Chord:
         cb_backend = cb_task.get_backend()
         wait_count = len(results)
         cb_status = "READY" if wait_count == 0 else "WAITING"
+        workflow_status = "WAITING_CALLBACK" if wait_count == 0 else "RUNNING"
 
         cb_run = TaskRun.objects.create(
             backend_alias=cb_backend.alias,
@@ -158,6 +160,17 @@ class Chord:
             workflow_id=self.workflow_id,
             wait_count=wait_count,
             errors_json=[]
+        )
+
+        WorkflowRun.objects.create(
+            workflow_id=self.workflow_id,
+            expected_count=wait_count,
+            success_count=0,
+            failure_count=0,
+            callback_result_id=cb_run.result_id,
+            status=workflow_status,
+            created_at=timezone.now(),
+            updated_at=timezone.now(),
         )
 
         return results, TaskResultProxy(str(cb_run.result_id), cb_backend)

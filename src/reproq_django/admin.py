@@ -9,7 +9,7 @@ from django.db.models import Count, Q
 from datetime import timedelta
 from django.urls import path, reverse
 from django.http import HttpResponseRedirect
-from .models import TaskRun, Worker, PeriodicTask, RateLimit
+from .models import TaskRun, Worker, PeriodicTask, RateLimit, WorkflowRun
 
 def format_json(field_data):
     if not field_data:
@@ -42,6 +42,7 @@ class LeaseStatusFilter(admin.SimpleListFilter):
 class WorkerAdmin(admin.ModelAdmin):
     list_display = ("worker_id", "hostname_display", "concurrency", "queues", "status_icon", "last_seen_at")
     readonly_fields = ("worker_id", "hostname", "concurrency", "queues", "started_at", "last_seen_at", "version")
+    actions = ["delete_stale_workers"]
     
     def hostname_display(self, obj):
         return f"{obj.hostname} (v{obj.version or '?'})"
@@ -56,12 +57,26 @@ class WorkerAdmin(admin.ModelAdmin):
 
     def has_add_permission(self, request): return False
 
+    @admin.action(description="Delete stale workers (last seen > 10m)")
+    def delete_stale_workers(self, request, queryset):
+        cutoff = timezone.now() - timedelta(minutes=10)
+        stale = Worker.objects.filter(last_seen_at__lt=cutoff)
+        count = stale.count()
+        stale.delete()
+        self.message_user(request, f"Deleted {count} stale worker(s).", messages.SUCCESS)
+
 @admin.register(PeriodicTask)
 class PeriodicTaskAdmin(admin.ModelAdmin):
     list_display = ("name", "cron_expr", "task_path", "next_run_at", "enabled", "last_run_at")
     list_filter = ("enabled", "queue_name")
     search_fields = ("name", "task_path")
     ordering = ("next_run_at",)
+
+@admin.register(WorkflowRun)
+class WorkflowRunAdmin(admin.ModelAdmin):
+    list_display = ("workflow_id", "status", "expected_count", "success_count", "failure_count", "callback_result_id", "updated_at")
+    search_fields = ("workflow_id", "callback_result_id")
+    ordering = ("-updated_at",)
 
 @admin.register(RateLimit)
 class RateLimitAdmin(admin.ModelAdmin):
@@ -94,6 +109,7 @@ class TaskRunAdmin(admin.ModelAdmin):
         "replay_tasks",
         "retry_failed_tasks",
         "cancel_tasks",
+        "delete_successful_tasks",
         "create_expired_lease_test_task",
     ]
     change_list_template = "admin/reproq_django/taskrun/change_list.html"
@@ -223,6 +239,13 @@ class TaskRunAdmin(admin.ModelAdmin):
         updated = queryset.filter(status__in=["READY", "RUNNING"]).update(cancel_requested=True)
         queryset.filter(status="READY").update(status="CANCELLED")
         self.message_user(request, f"Requested cancellation for {updated} tasks.", messages.SUCCESS)
+
+    @admin.action(description="Delete selected SUCCESSFUL tasks")
+    def delete_successful_tasks(self, request, queryset):
+        successful = queryset.filter(status="SUCCESSFUL")
+        count = successful.count()
+        successful.delete()
+        self.message_user(request, f"Deleted {count} successful task(s).", messages.SUCCESS)
 
     @admin.action(description="Create expired-lease test task (for reclaim)")
     def create_expired_lease_test_task(self, request, queryset):

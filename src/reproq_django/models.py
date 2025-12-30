@@ -93,6 +93,25 @@ class PeriodicTask(models.Model):
     def __str__(self):
         return f"{self.name} ({self.cron_expr})"
 
+class WorkflowRun(models.Model):
+    workflow_id = models.UUIDField(primary_key=True)
+    expected_count = models.IntegerField()
+    success_count = models.IntegerField(default=0)
+    failure_count = models.IntegerField(default=0)
+    callback_result_id = models.BigIntegerField(null=True, blank=True)
+    status = models.TextField(default="RUNNING")
+    created_at = models.DateTimeField()
+    updated_at = models.DateTimeField()
+
+    class Meta:
+        db_table = "workflow_runs"
+        verbose_name = "Workflow Run"
+        verbose_name_plural = "Workflow Runs"
+        managed = False
+
+    def __str__(self):
+        return str(self.workflow_id)
+
 class RateLimit(models.Model):
     key = models.TextField(primary_key=True)
     tokens_per_second = models.FloatField()
