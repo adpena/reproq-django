@@ -35,6 +35,7 @@
                 <a href="#determinism" class="block px-3 py-2 text-sm font-medium rounded-md hover:bg-slate-100 text-slate-700">Determinism & Dedup</a>
                 <a href="#payloads" class="block px-3 py-2 text-sm font-medium rounded-md hover:bg-slate-100 text-slate-700">Large Payloads</a>
                 <a href="#periodic" class="block px-3 py-2 text-sm font-medium rounded-md hover:bg-slate-100 text-slate-700">Periodic Tasks</a>
+                <a href="#rate-limits" class="block px-3 py-2 text-sm font-medium rounded-md hover:bg-slate-100 text-slate-700">Rate Limiting</a>
                 <a href="#production" class="block px-3 py-2 text-sm font-medium rounded-md hover:bg-slate-100 text-slate-700">Production (systemd)</a>
                 <a href="https://github.com/adpena/reproq-django/blob/main/RENDER.md" class="block px-3 py-2 text-sm font-medium rounded-md hover:bg-slate-100 text-slate-700">Production (Render)</a>
                 <div class="pt-4 pb-2 text-xs font-semibold text-slate-400 uppercase tracking-wider px-3">Monitoring</div>
@@ -178,6 +179,17 @@ def send_welcome_email(user_id, **_kwargs):
             <section id="periodic" class="mb-16 prose prose-slate max-w-none">
                 <h2 class="text-3xl font-bold mb-6">Periodic Tasks</h2>
                 <p>Manage cron schedules directly from the Django Admin or using the <code>PeriodicTask</code> model. Ensure the <code>reproq beat</code> process is running to trigger them.</p>
+            </section>
+
+            <section id="rate-limits" class="mb-16 prose prose-slate max-w-none">
+                <h2 class="text-3xl font-bold mb-6">Rate Limiting</h2>
+                <p>Reproq Worker enforces token bucket limits stored in the <code>rate_limits</code> table. Configure limits in the Django Admin or via the worker CLI.</p>
+                <ul>
+                    <li><strong>queue:&lt;queue_name&gt;</strong>: Limit a queue.</li>
+                    <li><strong>task:&lt;task_path&gt;</strong>: Limit a task (overrides queue/global).</li>
+                    <li><strong>global</strong>: Fallback limit if no task/queue entry exists.</li>
+                </ul>
+                <pre>reproq limit set --key queue:default --rate 5 --burst 10</pre>
             </section>
 
             <section id="production" class="mb-16">

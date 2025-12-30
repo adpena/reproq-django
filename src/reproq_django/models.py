@@ -92,3 +92,19 @@ class PeriodicTask(models.Model):
 
     def __str__(self):
         return f"{self.name} ({self.cron_expr})"
+
+class RateLimit(models.Model):
+    key = models.TextField(primary_key=True)
+    tokens_per_second = models.FloatField()
+    burst_size = models.IntegerField()
+    current_tokens = models.FloatField()
+    last_refilled_at = models.DateTimeField()
+
+    class Meta:
+        db_table = "rate_limits"
+        verbose_name = "Rate Limit"
+        verbose_name_plural = "Rate Limits"
+        managed = False
+
+    def __str__(self):
+        return self.key

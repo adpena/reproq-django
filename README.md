@@ -243,6 +243,22 @@ The worker updates `run_after` on the failed task, and the backend will only cla
 
 ---
 
+## 🚦 Rate Limiting
+
+Reproq Worker enforces token bucket limits stored in the `rate_limits` table. You can manage these from Django Admin or via the worker CLI.
+
+Keys:
+- `queue:<queue_name>` limits a specific queue.
+- `task:<task_path>` limits a specific task (overrides queue/global).
+- `global` is a fallback when no task/queue limit exists.
+
+Example:
+```bash
+reproq limit set --key queue:default --rate 5 --burst 10
+```
+
+---
+
 ## 🖥 Management Commands
 
 The `python manage.py reproq` command is your Swiss Army knife.

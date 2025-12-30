@@ -9,7 +9,7 @@ from django.db.models import Count, Q
 from datetime import timedelta
 from django.urls import path, reverse
 from django.http import HttpResponseRedirect
-from .models import TaskRun, Worker, PeriodicTask
+from .models import TaskRun, Worker, PeriodicTask, RateLimit
 
 def format_json(field_data):
     if not field_data:
@@ -62,6 +62,12 @@ class PeriodicTaskAdmin(admin.ModelAdmin):
     list_filter = ("enabled", "queue_name")
     search_fields = ("name", "task_path")
     ordering = ("next_run_at",)
+
+@admin.register(RateLimit)
+class RateLimitAdmin(admin.ModelAdmin):
+    list_display = ("key", "tokens_per_second", "burst_size", "current_tokens", "last_refilled_at")
+    search_fields = ("key",)
+    ordering = ("key",)
 
 @admin.register(TaskRun)
 class TaskRunAdmin(admin.ModelAdmin):
