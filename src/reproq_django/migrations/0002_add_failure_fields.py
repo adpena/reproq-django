@@ -3,6 +3,36 @@
 from django.db import migrations, models
 
 
+def add_failure_fields(apps, schema_editor):
+    task_run = apps.get_model("reproq_django", "TaskRun")
+    table = task_run._meta.db_table
+    connection = schema_editor.connection
+    with connection.cursor() as cursor:
+        existing = {
+            column.name
+            for column in connection.introspection.get_table_description(cursor, table)
+        }
+
+    fields = [
+        ("last_error", models.TextField(blank=True, null=True)),
+        ("failed_at", models.DateTimeField(blank=True, null=True)),
+    ]
+    for name, field in fields:
+        if name in existing:
+            continue
+        field.set_attributes_from_name(name)
+        column_type = field.db_type(connection)
+        if not column_type:
+            continue
+        schema_editor.execute(
+            "ALTER TABLE {table} ADD COLUMN {column} {column_type}".format(
+                table=schema_editor.quote_name(table),
+                column=schema_editor.quote_name(name),
+                column_type=column_type,
+            )
+        )
+
+
 class Migration(migrations.Migration):
 
     dependencies = [
@@ -10,14 +40,21 @@ class Migration(migrations.Migration):
     ]
 
     operations = [
-        migrations.AddField(
-            model_name="taskrun",
-            name="last_error",
-            field=models.TextField(blank=True, null=True),
-        ),
-        migrations.AddField(
-            model_name="taskrun",
-            name="failed_at",
-            field=models.DateTimeField(blank=True, null=True),
+        migrations.SeparateDatabaseAndState(
+            database_operations=[
+                migrations.RunPython(add_failure_fields, migrations.RunPython.noop),
+            ],
+            state_operations=[
+                migrations.AddField(
+                    model_name="taskrun",
+                    name="last_error",
+                    field=models.TextField(blank=True, null=True),
+                ),
+                migrations.AddField(
+                    model_name="taskrun",
+                    name="failed_at",
+                    field=models.DateTimeField(blank=True, null=True),
+                ),
+            ],
         ),
     ]
