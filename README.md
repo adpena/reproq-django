@@ -23,6 +23,16 @@ Reproq is split into two specialized components:
 - **Periodic Tasks**: Built-in scheduler with Django models.
 - **Monitoring**: TaskRuns + Workers in Django Admin.
 
+## ✅ Compatibility
+
+| Component | Supported |
+| :--- | :--- |
+| Django | 6.x (`Django>=6.0,<7.0`) |
+| Python | 3.12+ (dev/CI uses 3.12.x) |
+| Reproq Worker | Latest release (install/upgrade via `python manage.py reproq install` / `upgrade`) |
+
+Use `python manage.py reproq doctor` to verify schema, worker binary, and DSN alignment.
+
 ---
 
 ## ⚡ Quickstart
@@ -85,6 +95,7 @@ python manage.py reproq worker
 ## 🧰 Management Commands
 
 Run `python manage.py reproq <subcommand>` to manage the worker and day-to-day ops.
+Full reference (examples + exit codes): `docs/cli.md`.
 
 - **Bootstrap**: `init` writes `reproq.yaml`/`reproq.toml`, installs the worker, and runs migrations.
 - **Config**: `config --explain` prints the effective config and its precedence.

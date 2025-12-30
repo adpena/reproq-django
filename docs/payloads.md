@@ -56,3 +56,76 @@ Payload modes map to executor flags:
 ## 6. Stdout/Stderr Handling
 
 The executor writes only the JSON result envelope to stdout. Task `print()` output is captured internally and suppressed, with a short notice sent to stderr. The worker captures stdout/stderr (up to its configured limits) and can persist them to `logs_uri` when `REPROQ_LOGS_DIR` is set.
+
+## 7. Worker/Executor Contract
+
+The Go worker invokes `python -m reproq_django.executor` and sends a canonical JSON spec via stdin (or a file). The executor returns a JSON result envelope on stdout.
+
+### Spec Payload (input)
+Common fields in the spec JSON:
+- `v`: Integer schema version (currently `1`).
+- `task_path`: Python import path for the task (for example `myapp.tasks.send_email`).
+- `args`: Positional arguments array.
+- `kwargs`: Keyword arguments object.
+- `takes_context`: Boolean; when true, the executor passes a context dict as the first arg.
+- `queue_name`: Queue name (string).
+- `priority`: Integer priority.
+- `lock_key`: Optional string for concurrency control.
+- `run_after`: ISO 8601 timestamp or `null`.
+- `exec.timeout_seconds`: Max execution seconds.
+- `exec.max_attempts`: Max attempts before final failure.
+- `provenance.code_ref`: Optional code version identifier.
+- `provenance.pip_lock_hash`: Optional lockfile hash.
+- `django.settings_module`: Optional override for `DJANGO_SETTINGS_MODULE`.
+
+Example payload:
+```json
+{
+  "v": 1,
+  "task_path": "myapp.tasks.send_email",
+  "args": [123],
+  "kwargs": {"welcome": true},
+  "takes_context": false,
+  "queue_name": "default",
+  "priority": 0,
+  "lock_key": null,
+  "run_after": null,
+  "exec": {"timeout_seconds": 900, "max_attempts": 3},
+  "provenance": {"code_ref": "v1.2.3", "pip_lock_hash": "sha256:..."}
+}
+```
+
+### Result Envelope (output)
+Success:
+```json
+{"ok": true, "return": {"status": "sent"}}
+```
+
+Failure:
+```json
+{"ok": false, "exception_class": "ValueError", "message": "Bad input", "traceback": "..."}
+```
+
+Notes:
+- `traceback` is included when available.
+- The executor exits non-zero on failure; the worker translates this into a `FAILED` task run.
+
+## 8. logs_uri and `reproq logs`
+
+When `REPROQ_LOGS_DIR` (or `--logs-dir`) is set, the worker persists stdout/stderr to a file and stores the path in `task_runs.logs_uri`. The default file format is:
+
+```
+STDOUT:
+<stdout text>
+STDERR:
+<stderr text>
+```
+
+The `logs_uri` value can be a local file path or an HTTP/HTTPS URL. Use:
+
+```bash
+python manage.py reproq logs --id 1234 --tail 200
+python manage.py reproq logs --id 1234 --show-path
+```
+
+Use `--max-bytes` to cap the read size. If `logs_uri` is empty, no logs were captured or persisted.

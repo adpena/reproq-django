@@ -23,6 +23,8 @@ exec gunicorn myproj.wsgi:application --workers=1 --timeout=120
 
 Only one `beat` instance should run per database.
 
+For a full command reference and examples, see `docs/cli.md`.
+
 ## 1. Systemd Configuration (Recommended)
 
 Reproq provides an automated way to generate systemd service files. This is the preferred method for Linux servers.
@@ -144,3 +146,26 @@ enqueueing deploy-time tasks in a pre-deploy hook. Older worker processes
 can still claim the task with outdated environment settings. Prefer a
 post-start enqueue guarded by a deploy identifier (for example,
 `RENDER_DEPLOY_ID`) so the task runs once per deploy.
+
+## 7. Troubleshooting Runbook
+
+**Tasks stuck in RUNNING**
+- Reclaim expired leases: `python manage.py reproq reclaim --older-than 5m --action requeue`
+- If tasks should fail instead: `--action fail`
+- Verify workers are heartbeating (`python manage.py reproq status`)
+
+**Allowlist errors or missing tasks**
+- Auto-generate: `python manage.py reproq allowlist --write --config reproq.yaml`
+- For local dev only, `ALLOWED_TASK_MODULES=*` disables validation.
+
+**Schema mismatch or missing columns**
+- Run `python manage.py reproq migrate-worker` and re-check `python manage.py reproq doctor`.
+- If you used legacy array-based worker migrations, apply the JSONB conversion migration from the reproq-worker repo.
+
+**DSN or config precedence confusion**
+- Use `python manage.py reproq config --explain` to see the winning values.
+- `--dsn` overrides `DATABASE_URL`, and `DATABASE_URL` is optional when a config file or flags supply the DSN.
+
+**No logs available**
+- Ensure `REPROQ_LOGS_DIR` (or `--logs-dir`) is set on the worker.
+- Inspect logs via `python manage.py reproq logs --id <result_id>`.
