@@ -31,6 +31,16 @@ Reproq provides an automated way to generate systemd service files. This is the 
 python manage.py reproq systemd --concurrency 20
 ```
 
+To bake metrics settings into the unit files:
+```bash
+python manage.py reproq systemd --metrics-addr 127.0.0.1:9090 --metrics-auth-token "$METRICS_AUTH_TOKEN" --metrics-allow-cidrs "127.0.0.1/32"
+```
+
+You can also provide an environment file:
+```bash
+python manage.py reproq systemd --env-file /etc/reproq-worker.env
+```
+
 This will output two service files:
 - `reproq-worker.service`: Manages the task execution nodes.
 - `reproq-beat.service`: Manages the periodic task scheduler.
@@ -61,6 +71,12 @@ Reproq Django uses JSONB columns for worker metadata (`task_runs.worker_ids` and
 migrations that created array columns, apply
 `migrations/000013_convert_worker_arrays_to_jsonb.up.sql` from the reproq-worker
 repo before starting the worker.
+
+## 2a. Metrics & Health Hardening
+If you enable metrics (via `--metrics-port` or `--metrics-addr`), secure the endpoint:
+- Bind to localhost or a private interface (for example `--metrics-addr 127.0.0.1:9090`).
+- Set `METRICS_AUTH_TOKEN` to require a bearer token.
+- Optionally set `METRICS_ALLOW_CIDRS` to restrict access by IP or CIDR.
 
 ## 3. Worker Concurrency
 

@@ -6,7 +6,7 @@ Reproq follows a "split-brain" architecture to maximize both developer productiv
 
 1. **Reproq Django (The Manager)**
    - Responsible for task definition via the standard `@task` decorator.
-   - Manages the PostgreSQL tables (`reproq_task`, `reproq_periodictask`, `reproq_worker`).
+   - Manages the PostgreSQL tables (`task_runs`, `periodic_tasks`, `reproq_workers`).
    - Provides the enqueuing logic and ensures tasks are written to the database with the correct `spec_hash`.
    - Offers the Django Admin dashboard for monitoring and manual control.
 
@@ -23,8 +23,8 @@ Reproq follows a "split-brain" architecture to maximize both developer productiv
 
 ## The Execution Flow
 
-1. **Enqueue**: Python code calls `my_task.enqueue(args)`. Django inserts a row into `reproq_task` with state `PENDING`.
-2. **Claim**: The Go worker polls the database. It finds the `PENDING` task and atomically updates it to `RUNNING`, setting its `worker_id` and a lease timestamp.
+1. **Enqueue**: Python code calls `my_task.enqueue(args)`. Django inserts a row into `task_runs` with state `READY`.
+2. **Claim**: The Go worker polls the database. It finds the `READY` task and atomically updates it to `RUNNING`, setting its `worker_id` and a lease timestamp.
 3. **Execute**: The Go worker starts a Python sub-process. It passes the task payload via `stdin` as JSON.
 4. **Heartbeat**: While the Python process is running, the Go worker periodically updates the task's lease in the database.
 5. **Finalize**: Once the Python process finishes, it outputs the result (or traceback) to `stdout`. The Go worker captures this and updates the database state to `SUCCESSFUL` or `FAILED`.

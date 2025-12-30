@@ -275,6 +275,20 @@ Defaults: global rate limiting is disabled until you set a positive rate.
 
 ---
 
+## 🧰 Worker CLI Ops
+
+The Go worker binary includes operational commands you can run directly:
+
+```bash
+# Request cancellation of a running task
+reproq cancel --dsn "..." --id 12345
+
+# Inspect failed tasks
+reproq triage list --dsn "..." --limit 50
+```
+
+---
+
 ## 🖥 Management Commands
 
 The `python manage.py reproq` command is your Swiss Army knife.
@@ -282,7 +296,7 @@ The `python manage.py reproq` command is your Swiss Army knife.
 | Subcommand | Description |
 | :--- | :--- |
 | `init` | Bootstraps Reproq in the current project. |
-| `worker` | Starts the Go worker. Flags: `--concurrency` (default 10), `--queue`. |
+| `worker` | Starts the Go worker. Flags: `--concurrency` (default 10), `--queues`, `--allowed-task-modules`, `--payload-mode`, `--metrics-port`, `--metrics-addr`, `--metrics-auth-token`, `--metrics-allow-cidrs`. |
 | `beat` | Starts the scheduler. Flags: `--interval` (default 30s). |
 | `install` | Downloads/builds the worker binary. |
 | `migrate-worker` | Applies essential SQL schema optimizations (indexes, extensions). |
@@ -293,7 +307,6 @@ The `python manage.py reproq` command is your Swiss Army knife.
 | `stats` | Shows task counts by status and active workers. |
 | `systemd` | Generates systemd service files for production. |
 | `stress-test` | Enqueues dummy tasks for benchmarking. |
-| `reproq_health` | Health check for DB, workers, and queues. |
 
 ---
 
@@ -331,12 +344,19 @@ python manage.py reproq systemd --user myuser --concurrency 20
 ```
 
 This generates `reproq-worker.service` and `reproq-beat.service`. Copy them to `/etc/systemd/system/` and enable them.
+You can pass metrics flags (for example `--metrics-addr 127.0.0.1:9090`) or use `--env-file` to load `METRICS_AUTH_TOKEN` and `METRICS_ALLOW_CIDRS`.
 
 ### Env Vars
 The Go worker relies on standard environment variables:
 - `DATABASE_URL`: `postgres://user:pass@host:5432/db`
 - `WORKER_ID`: (Optional) Unique name for the node.
 - `REPROQ_WORKER_BIN`: (Optional) Path to the binary if not using `manage.py reproq install`.
+- `ALLOWED_TASK_MODULES`: (Optional) Comma-separated task module allow-list for the worker.
+- `METRICS_AUTH_TOKEN`: (Optional) Bearer token for `/metrics` and `/healthz`.
+- `METRICS_ALLOW_CIDRS`: (Optional) Comma-separated IP/CIDR allow-list for metrics/health.
+- `METRICS_AUTH_LIMIT`: (Optional) Max unauthorized requests per window (default 30).
+- `METRICS_AUTH_WINDOW`: (Optional) Rate limit window (default 1m).
+- `METRICS_AUTH_MAX_ENTRIES`: (Optional) Max tracked hosts for auth rate limiting (default 1000).
 
 ---
 

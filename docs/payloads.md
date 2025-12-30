@@ -31,4 +31,8 @@ If your task needs to return a large amount of data, consider:
 
 ## 3. Serialization
 
-Reproq uses Django's `JSONEncoder` to serialize arguments. Ensure your arguments are JSON-serializable. For complex types like `Decimal` or `UUID`, the backend handles them automatically, but custom objects will require manual serialization.
+Reproq computes `spec_hash` using Python's standard `json.dumps` with canonical sorting. Ensure your arguments and kwargs are JSON-serializable. For complex types like `Decimal` or `UUID`, convert them to strings (or add a serializer) before enqueueing.
+
+## 4. Payload Transport Modes
+
+The Go worker defaults to passing payloads over stdin. Avoid inline payload mode in production because it exposes payload data in process arguments. Production builds of the worker (`-tags prod`) reject `--payload-mode inline`.

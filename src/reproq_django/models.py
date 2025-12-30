@@ -1,5 +1,13 @@
 from django.db import models
 
+
+class TaskRunStatus:
+    READY = "READY"
+    RUNNING = "RUNNING"
+    WAITING = "WAITING"
+    SUCCESSFUL = "SUCCESSFUL"
+    FAILED = "FAILED"
+
 class TaskRun(models.Model):
     result_id = models.BigAutoField(primary_key=True)
     backend_alias = models.TextField(default="default")
@@ -10,7 +18,7 @@ class TaskRun(models.Model):
     spec_json = models.JSONField()
     spec_hash = models.CharField(max_length=64)
 
-    status = models.TextField(default="READY")
+    status = models.TextField(default=TaskRunStatus.READY)
     enqueued_at = models.DateTimeField(auto_now_add=True)
     started_at = models.DateTimeField(null=True, blank=True)
     last_attempted_at = models.DateTimeField(null=True, blank=True)
@@ -30,6 +38,8 @@ class TaskRun(models.Model):
 
     return_json = models.JSONField(null=True, blank=True)
     errors_json = models.JSONField(default=list, blank=True)
+    last_error = models.TextField(null=True, blank=True)
+    failed_at = models.DateTimeField(null=True, blank=True)
 
     leased_until = models.DateTimeField(null=True, blank=True)
     leased_by = models.TextField(null=True, blank=True)

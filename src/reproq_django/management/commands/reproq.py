@@ -1,5 +1,6 @@
 import os
 import re
+import shlex
 import subprocess
 import sys
 import platform
@@ -23,8 +24,17 @@ class Command(BaseCommand):
         # Worker
         worker_parser = subparsers.add_parser("worker", help="Start the Go worker")
         worker_parser.add_argument("--concurrency", type=int, default=10)
-        worker_parser.add_argument("--queue", type=str, default="default")
+        worker_parser.add_argument("--queues", type=str, default="", help="Comma-separated queue names")
+        worker_parser.add_argument("--queue", type=str, default="default", help="Deprecated (use --queues)")
+        worker_parser.add_argument("--allowed-task-modules", type=str, default="", help="Comma-separated task module allow-list")
+        worker_parser.add_argument("--payload-mode", type=str, default="", help="Payload mode: stdin|file|inline")
         worker_parser.add_argument("--metrics-port", type=int, default=0, help="Port to serve Prometheus metrics")
+        worker_parser.add_argument("--metrics-addr", type=str, default="", help="Address to serve health/metrics")
+        worker_parser.add_argument("--metrics-auth-token", type=str, default="", help="Bearer token required for health/metrics")
+        worker_parser.add_argument("--metrics-allow-cidrs", type=str, default="", help="Comma-separated IP/CIDR allow-list")
+        worker_parser.add_argument("--metrics-auth-limit", type=int, default=None, help="Unauthorized request limit per window")
+        worker_parser.add_argument("--metrics-auth-window", type=str, default="", help="Rate limit window (e.g. 1m)")
+        worker_parser.add_argument("--metrics-auth-max-entries", type=int, default=None, help="Max tracked hosts for auth rate limiting")
 
         # Beat
         beat_parser = subparsers.add_parser("beat", help="Start the periodic task scheduler (beat)")
@@ -59,6 +69,17 @@ class Command(BaseCommand):
         systemd_parser.add_argument("--user", type=str, help="User to run as")
         systemd_parser.add_argument("--group", type=str, help="Group to run as")
         systemd_parser.add_argument("--concurrency", type=int, default=10)
+        systemd_parser.add_argument("--queues", type=str, default="", help="Comma-separated queue names")
+        systemd_parser.add_argument("--allowed-task-modules", type=str, default="", help="Comma-separated task module allow-list")
+        systemd_parser.add_argument("--payload-mode", type=str, default="", help="Payload mode: stdin|file|inline")
+        systemd_parser.add_argument("--metrics-port", type=int, default=0, help="Port to serve Prometheus metrics")
+        systemd_parser.add_argument("--metrics-addr", type=str, default="", help="Address to serve health/metrics")
+        systemd_parser.add_argument("--metrics-auth-token", type=str, default="", help="Bearer token required for health/metrics")
+        systemd_parser.add_argument("--metrics-allow-cidrs", type=str, default="", help="Comma-separated IP/CIDR allow-list")
+        systemd_parser.add_argument("--metrics-auth-limit", type=int, default=None, help="Unauthorized request limit per window")
+        systemd_parser.add_argument("--metrics-auth-window", type=str, default="", help="Rate limit window (e.g. 1m)")
+        systemd_parser.add_argument("--metrics-auth-max-entries", type=int, default=None, help="Max tracked hosts for auth rate limiting")
+        systemd_parser.add_argument("--env-file", type=str, default="", help="Optional EnvironmentFile path")
 
         # Reclaim
         reclaim_parser = subparsers.add_parser(
@@ -256,7 +277,7 @@ class Command(BaseCommand):
             if os.path.exists(source_path):
                 self.stdout.write(f"Building from local source: {source_path}...")
                 try:
-                    subprocess.run(["go", "build", "-o", tmp_path, "./cmd/reproq"], cwd=source_path, check=True)
+                    subprocess.run(["go", "build", "-tags", "prod", "-o", tmp_path, "./cmd/reproq"], cwd=source_path, check=True)
                     success = True
                 except Exception as e:
                     self.stderr.write(self.style.WARNING(f"Local build failed: {e}"))
@@ -286,10 +307,48 @@ class Command(BaseCommand):
         group = options["group"] or user
         project_name = os.path.basename(cwd)
         
+        worker_args = [
+            python_bin,
+            manage_py,
+            "reproq",
+            "worker",
+            "--concurrency",
+            str(options["concurrency"]),
+        ]
+        if options.get("queues"):
+            worker_args.extend(["--queues", options["queues"]])
+        if options.get("allowed_task_modules"):
+            worker_args.extend(["--allowed-task-modules", options["allowed_task_modules"]])
+        if options.get("payload_mode"):
+            worker_args.extend(["--payload-mode", options["payload_mode"]])
+        if options.get("metrics_addr"):
+            worker_args.extend(["--metrics-addr", options["metrics_addr"]])
+        elif options.get("metrics_port"):
+            worker_args.extend(["--metrics-port", str(options["metrics_port"])])
+        beat_args = [python_bin, manage_py, "reproq", "beat"]
+
         services = {
-            "worker": f"{python_bin} {manage_py} reproq worker --concurrency {options['concurrency']}",
-            "beat": f"{python_bin} {manage_py} reproq beat"
+            "worker": " ".join(shlex.quote(str(arg)) for arg in worker_args),
+            "beat": " ".join(shlex.quote(str(arg)) for arg in beat_args),
         }
+
+        env_lines = []
+        if options.get("env_file"):
+            env_lines.append(f"EnvironmentFile={options['env_file']}")
+        if options.get("metrics_auth_token"):
+            env_lines.append(self._render_env("METRICS_AUTH_TOKEN", options["metrics_auth_token"]))
+        if options.get("metrics_allow_cidrs"):
+            env_lines.append(self._render_env("METRICS_ALLOW_CIDRS", options["metrics_allow_cidrs"]))
+        if options.get("metrics_auth_limit") is not None:
+            env_lines.append(self._render_env("METRICS_AUTH_LIMIT", str(options["metrics_auth_limit"])))
+        if options.get("metrics_auth_window"):
+            env_lines.append(self._render_env("METRICS_AUTH_WINDOW", options["metrics_auth_window"]))
+        if options.get("metrics_auth_max_entries") is not None:
+            env_lines.append(self._render_env("METRICS_AUTH_MAX_ENTRIES", str(options["metrics_auth_max_entries"])))
+
+        env_block = ""
+        if env_lines:
+            env_block = "\n".join(env_lines) + "\n"
 
         for name, cmd in services.items():
             content = f"""[Unit]
@@ -301,7 +360,7 @@ Type=simple
 User={user}
 Group={group}
 WorkingDirectory={cwd}
-ExecStart={cmd}
+{env_block}ExecStart={cmd}
 Restart=always
 RestartSec=5
 
@@ -448,8 +507,27 @@ WantedBy=multi-user.target
             tables = set(connection.introspection.table_names(cursor))
         required_tables = {"task_runs", "periodic_tasks", "reproq_workers", "rate_limits", "workflow_runs"}
         missing_tables = sorted(required_tables - tables)
+        ensure_statements = [
+            """
+            ALTER TABLE task_runs
+            ADD COLUMN IF NOT EXISTS last_error TEXT;
+            """,
+            """
+            ALTER TABLE task_runs
+            ADD COLUMN IF NOT EXISTS failed_at TIMESTAMPTZ;
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_task_runs_failed_at
+            ON task_runs (failed_at)
+            WHERE status = 'FAILED';
+            """,
+        ]
         if not missing_tables:
             self.stdout.write(self.style.SUCCESS("✅ Reproq schema already present."))
+            with connection.cursor() as cursor:
+                for statement in ensure_statements:
+                    cursor.execute(statement)
+            self.stdout.write(self.style.SUCCESS("✅ Reproq schema updated."))
             return
         self.stdout.write(
             self.style.MIGRATE_HEADING(
@@ -478,6 +556,8 @@ WantedBy=multi-user.target
                 worker_ids JSONB NOT NULL DEFAULT '[]'::jsonb,
                 return_json JSONB,
                 errors_json JSONB NOT NULL DEFAULT '[]'::jsonb,
+                last_error TEXT,
+                failed_at TIMESTAMPTZ,
                 leased_until TIMESTAMPTZ,
                 leased_by TEXT,
                 logs_uri TEXT,
@@ -514,6 +594,11 @@ WantedBy=multi-user.target
             """
             CREATE INDEX IF NOT EXISTS idx_task_runs_workflow_id
             ON task_runs (workflow_id);
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_task_runs_failed_at
+            ON task_runs (failed_at)
+            WHERE status = 'FAILED';
             """,
             """
             CREATE TABLE IF NOT EXISTS periodic_tasks (
@@ -581,6 +666,8 @@ WantedBy=multi-user.target
         with connection.cursor() as cursor:
             for statement in statements:
                 cursor.execute(statement)
+            for statement in ensure_statements:
+                cursor.execute(statement)
         self.stdout.write(self.style.SUCCESS("✅ Reproq schema applied."))
 
     def run_worker_or_beat(self, cmd, options):
@@ -603,8 +690,29 @@ WantedBy=multi-user.target
         args = [worker_bin, cmd, "--dsn", dsn]
         if cmd == "worker":
             args.extend(["--concurrency", str(options["concurrency"])])
+            queues = options.get("queues") or ""
+            if queues:
+                args.extend(["--queues", queues])
+            else:
+                args.extend(["--queues", options.get("queue", "default")])
+            if options.get("allowed_task_modules"):
+                args.extend(["--allowed-task-modules", options["allowed_task_modules"]])
+            if options.get("payload_mode"):
+                args.extend(["--payload-mode", options["payload_mode"]])
             if options.get("metrics_port"):
                 args.extend(["--metrics-port", str(options["metrics_port"])])
+            if options.get("metrics_addr"):
+                args.extend(["--metrics-addr", options["metrics_addr"]])
+            if options.get("metrics_auth_token"):
+                args.extend(["--metrics-auth-token", options["metrics_auth_token"]])
+            if options.get("metrics_allow_cidrs"):
+                args.extend(["--metrics-allow-cidrs", options["metrics_allow_cidrs"]])
+            if options.get("metrics_auth_limit") is not None:
+                args.extend(["--metrics-auth-limit", str(options["metrics_auth_limit"])])
+            if options.get("metrics_auth_window"):
+                args.extend(["--metrics-auth-window", options["metrics_auth_window"]])
+            if options.get("metrics_auth_max_entries") is not None:
+                args.extend(["--metrics-auth-max-entries", str(options["metrics_auth_max_entries"])])
         elif cmd == "beat":
             args.extend(["--interval", options["interval"]])
             
@@ -742,3 +850,7 @@ WantedBy=multi-user.target
         db = parsed.path.lstrip("/") if parsed.path else ""
         user_part = f"{user}@" if user else ""
         return f"{parsed.scheme}://{user_part}{host}{port}/{db}"
+
+    def _render_env(self, key, value):
+        escaped = str(value).replace('"', '\\"')
+        return f'Environment="{key}={escaped}"'

@@ -9,7 +9,10 @@ When you enqueue a task, Reproq generates a SHA256 hash of the "specification":
 - Arguments (`args`)
 - Keyword arguments (`kwargs`)
 - Queue name
-- Lock key (if any)
+- Priority
+- Run-after timestamp
+- Execution settings (timeout, max attempts)
+- Provenance metadata (when configured)
 
 This hash is stored in the `spec_hash` column.
 
@@ -37,7 +40,7 @@ When `DEDUP_ACTIVE` is True, Reproq will check if a task with the **exact same s
 
 ## Forcing a Run
 
-If you want to bypass deduplication for a specific call, you can change a non-functional argument (like a timestamp) or use a unique `lock_key`.
+If you want to bypass deduplication for a specific call, change a non-functional argument (like a timestamp) or disable dedup for that backend.
 
 Example with a deploy identifier:
 ```python
@@ -47,5 +50,5 @@ deploy_id = str(uuid.uuid4())
 notify_deploy_success.enqueue(deploy_id=deploy_id)
 ```
 
-### Migration Note
-If you previously applied legacy reproq-worker SQL migrations that created array columns for worker metadata, apply `migrations/000013_convert_worker_arrays_to_jsonb.up.sql` from the reproq-worker repo to keep schema expectations aligned with deduplication and worker tracking.
+### Note on `lock_key`
+`lock_key` is stored separately on `task_runs` and is not part of the `spec_hash`. Tasks that differ only by `lock_key` will still deduplicate when `DEDUP_ACTIVE` is enabled.
