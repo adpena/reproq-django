@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "reproq-django"
-version = "0.1.507"
+version = "0.1.508"
 description = "Django 6.0 Tasks backend for reproq-worker (Postgres queue + deterministic runner)"
 readme = "README.md"
 authors = [{name = "Alejandro Peña", email = "adpena@gmail.com"}]
@@ -19,7 +19,7 @@ classifiers = [
     "Programming Language :: Python :: 3.14",
 ]
 dependencies = [
-    "Django>=6.0",
+    "Django>=6.0,<7.0",
     "psycopg[binary]>=3.1.0",
 ]
 
