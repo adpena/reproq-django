@@ -132,7 +132,7 @@ process_invoice.enqueue(123, lock_key="invoice_123")</pre>
                 <pre>from reproq_django.workflows import chain
 
 chain(task_a, task_b, task_c).enqueue()</pre>
-                <p>Use <code>group</code> to enqueue tasks in parallel. Groups are a convenience for parallel runs and do not yet support chord-style callbacks.</p>
+                <p>Use <code>group</code> to enqueue tasks in parallel, or <code>chord</code> to run a callback after a group finishes.</p>
             </section>
 
             <section id="retries" class="mb-16 prose prose-slate max-w-none">

@@ -217,7 +217,7 @@ results = c.enqueue()
 ```
 
 ### Groups (Parallel)
-Execute tasks in parallel. Groups do not provide a "chord" callback yet; they are a convenience for enqueueing multiple independent tasks at once.
+Execute tasks in parallel.
 
 ```python
 from reproq_django.workflows import group
@@ -227,6 +227,19 @@ g = group(
     (resize_image, ("img2.jpg",), {}),
 )
 results = g.enqueue()
+```
+
+### Chords (Group + Callback)
+Run a callback once a group finishes.
+
+```python
+from reproq_django.workflows import chord
+
+group_results, callback_result = chord(
+    (resize_image, ("img1.jpg",), {}),
+    (resize_image, ("img2.jpg",), {}),
+    callback=notify_done,
+).enqueue()
 ```
 
 ---
