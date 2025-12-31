@@ -1,6 +1,6 @@
+import sys
 from django.core.management.base import BaseCommand
 from django.db import connection
-from django.conf import settings
 
 class Command(BaseCommand):
     help = "Validates Reproq Django setup"

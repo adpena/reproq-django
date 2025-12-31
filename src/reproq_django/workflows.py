@@ -1,7 +1,6 @@
 import uuid
 from typing import List, Any, Tuple
 from django.utils import timezone
-from django.tasks import Task
 from .proxy import TaskResultProxy
 from .models import TaskRun, WorkflowRun
 

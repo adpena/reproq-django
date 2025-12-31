@@ -4,7 +4,6 @@ import asyncio
 from typing import Any, TYPE_CHECKING
 from django.tasks import TaskResultStatus
 from django.tasks.exceptions import TaskResultDoesNotExist
-from django.utils import timezone
 from asgiref.sync import sync_to_async
 
 if TYPE_CHECKING:

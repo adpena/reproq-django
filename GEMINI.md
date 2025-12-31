@@ -44,6 +44,11 @@ To trigger immediately, set `next_run_at = timezone.now()` or call `enqueue()` o
 ## Developer Note
 When modifying the Django models or backend logic, ensure compatibility with the Go worker's claiming SQL (found in `reproq-worker/internal/queue/queue.go`).
 
+### Observability & Heatmaps
+- Surface rich statistics via `reproq_stats_api` to support TUI dashboards.
+- Track task failure heatmaps (top failing task paths) and queue depth trends.
+- Support OIDC/OAuth flows for TUI authentication if managed headers are used.
+
 ## Migration + Release Policy
 - Keep exactly one migration file in `src/reproq_django/migrations/` unless absolutely necessary.
 - Retain only three tags/releases at any time; delete older tags/releases and their artifacts.

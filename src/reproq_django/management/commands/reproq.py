@@ -1351,7 +1351,6 @@ WantedBy=multi-user.target
     def run_stats(self):
         from reproq_django.models import TaskRun, Worker
         from django.db.models import Count
-        import json
 
         self.stdout.write(self.style.MIGRATE_HEADING("📊 Reproq Statistics"))
         

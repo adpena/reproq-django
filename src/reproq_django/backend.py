@@ -1,9 +1,9 @@
 from __future__ import annotations
-import uuid
 from datetime import datetime, timedelta
 from typing import Any
 
-from django.db import connection, transaction, IntegrityError
+from django.tasks import Task
+from django.db import IntegrityError
 from django.tasks.backends.base import BaseTaskBackend
 from django.utils import timezone
 from asgiref.sync import sync_to_async

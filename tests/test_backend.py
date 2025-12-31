@@ -1,12 +1,10 @@
 import unittest
 import sys
 import os
-import json
-import subprocess
 import uuid
 from datetime import datetime, timezone, timedelta
 from decimal import Decimal
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 # Ensure src is in path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../src")))

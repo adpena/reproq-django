@@ -8,7 +8,6 @@ import os
 import signal
 import sys
 import traceback
-from typing import Any
 
 def setup_django(settings_module: str = None):
     if settings_module:
