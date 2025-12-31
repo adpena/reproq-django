@@ -12,7 +12,7 @@ from django.http import HttpResponse, JsonResponse, StreamingHttpResponse
 from django.views.decorators.http import require_GET
 
 from .models import TaskRun, Worker, PeriodicTask
-from .tui_auth import get_tui_internal_endpoints, verify_tui_token
+from .tui_auth import get_tui_internal_endpoints, tui_events_enabled, verify_tui_token
 
 AUTH_HEADER = "Authorization"
 TOKEN_HEADER = "X-Reproq-Token"
@@ -198,7 +198,8 @@ def _proxy_stream(request, target_url, kind):
         return JsonResponse({"error": f"{kind} not configured"}, status=404)
     req = _build_proxy_request(target_url)
     try:
-        resp = urllib.request.urlopen(req, timeout=5)
+        timeout = 30 if kind == "events" else 5
+        resp = urllib.request.urlopen(req, timeout=timeout)
     except urllib.error.HTTPError as err:
         duration_ms = int((time.monotonic() - start) * 1000)
         _log_proxy_error(kind, request, target_url, err, status=err.code, duration_ms=duration_ms)
@@ -242,6 +243,8 @@ def reproq_tui_health_proxy(request):
 def reproq_tui_events_proxy(request):
     if not _authorized(request):
         return JsonResponse({"error": "Unauthorized"}, status=403)
+    if not tui_events_enabled():
+        return JsonResponse({"error": "events disabled"}, status=404)
     target_url = _proxy_target("events")
     if target_url and request.META.get("QUERY_STRING"):
         target_url = f"{target_url}?{request.META.get('QUERY_STRING')}"

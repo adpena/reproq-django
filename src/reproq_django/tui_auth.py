@@ -31,6 +31,14 @@ def _get_tui_setting(name):
     return getattr(settings, name, "") or os.environ.get(name, "")
 
 
+def _truthy(value):
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def tui_events_enabled():
+    return not _truthy(_get_tui_setting("REPROQ_TUI_DISABLE_EVENTS"))
+
+
 def _normalize_base_url(raw):
     if not raw:
         return ""
@@ -76,7 +84,7 @@ def _public_worker_config():
     worker_url = _get_tui_setting("REPROQ_TUI_WORKER_URL")
     metrics_url = _get_tui_setting("REPROQ_TUI_WORKER_METRICS_URL")
     health_url = _get_tui_setting("REPROQ_TUI_WORKER_HEALTH_URL")
-    events_url = _get_tui_setting("REPROQ_TUI_EVENTS_URL")
+    events_url = _get_tui_setting("REPROQ_TUI_EVENTS_URL") if tui_events_enabled() else ""
     if not worker_url and metrics_url:
         trimmed = metrics_url.rstrip("/")
         if trimmed.endswith("/metrics"):
@@ -85,7 +93,7 @@ def _public_worker_config():
         metrics_url = _derive_metrics_url(worker_url)
     if metrics_url and not health_url:
         health_url = _derive_health_url(metrics_url)
-    if worker_url and not events_url:
+    if worker_url and not events_url and tui_events_enabled():
         events_url = _derive_events_url(worker_url)
 
     payload = {}
@@ -113,11 +121,14 @@ def get_tui_internal_endpoints():
     internal = _normalize_base_url(internal)
     if not internal:
         return {}
-    return {
+    endpoints = {
         "metrics": _join_url(internal, "/metrics"),
         "health": _join_url(internal, "/healthz"),
         "events": _join_url(internal, "/events"),
     }
+    if not tui_events_enabled():
+        endpoints.pop("events", None)
+    return endpoints
 
 
 def build_tui_config_payload(request):

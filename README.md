@@ -472,6 +472,12 @@ When you include `reproq_django.urls` in your project, `GET /stats/` returns
 JSON task counts, per-queue task counts, worker records, and periodic task
 schedules. Access is granted to staff sessions or an API token.
 
+## 🧭 TUI Integration
+
+Set `REPROQ_TUI_SECRET` to enable the TUI login flow and signed JWT access.
+If you do not want to expose SSE, set `REPROQ_TUI_DISABLE_EVENTS=1` to omit
+the `/reproq/tui/events/` stream from the TUI config payload.
+
 Configure a token via `METRICS_AUTH_TOKEN` (settings or env). The stats endpoint
 also accepts signed TUI JWTs (when `REPROQ_TUI_SECRET` is set).
 
