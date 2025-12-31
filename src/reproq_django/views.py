@@ -7,6 +7,7 @@ import urllib.error
 import urllib.request
 
 from django.conf import settings
+from django.db import connection
 from django.db.models import Count
 from django.http import HttpResponse, JsonResponse, StreamingHttpResponse
 from django.views.decorators.http import require_GET
@@ -43,6 +44,53 @@ def _authorized(request):
     if candidate and verify_tui_token(candidate):
         return True
     return request.user.is_authenticated and request.user.is_staff
+
+
+def _truthy(value):
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _beat_configured():
+    if "REPROQ_BEAT_CMD" not in os.environ:
+        return True
+    normalized = os.environ.get("REPROQ_BEAT_CMD", "").strip().lower()
+    return normalized not in {"", "0", "false", "off", "disabled", "none"}
+
+
+def _pg_cron_available():
+    if connection.vendor != "postgresql":
+        return False
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT COUNT(*) FROM pg_available_extensions WHERE name = 'pg_cron';"
+            )
+            return bool(cursor.fetchone()[0])
+    except Exception:
+        return False
+
+
+def _scheduler_status():
+    low_memory = tui_low_memory_enabled()
+    beat_configured = _beat_configured()
+    beat_enabled = beat_configured and not low_memory
+    pg_cron_available = _pg_cron_available()
+    if beat_enabled:
+        mode = "beat"
+    elif pg_cron_available:
+        mode = "pg_cron"
+    else:
+        mode = "disabled"
+    payload = {
+        "mode": mode,
+        "low_memory": low_memory,
+        "beat_enabled": beat_enabled,
+        "beat_configured": beat_configured,
+        "pg_cron_available": pg_cron_available,
+    }
+    if mode == "disabled":
+        payload["warning"] = "Periodic schedules are disabled."
+    return payload
 
 def _client_ip(request):
     forwarded = request.META.get("HTTP_X_FORWARDED_FOR", "")
@@ -119,6 +167,7 @@ def reproq_stats_api(request):
         "queues": queues,
         "workers": list(worker_stats),
         "periodic": list(periodic_stats),
+        "scheduler": _scheduler_status(),
         "top_failing": list(top_failing),
     })
 
