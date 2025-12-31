@@ -27,6 +27,111 @@ def _tui_enabled():
     return bool(_get_tui_secret())
 
 
+def _get_tui_setting(name):
+    return getattr(settings, name, "") or os.environ.get(name, "")
+
+
+def _normalize_base_url(raw):
+    if not raw:
+        return ""
+    raw = raw.strip()
+    if "://" not in raw:
+        raw = "http://" + raw
+    if raw.startswith("http://:"):
+        raw = "http://127.0.0.1:" + raw[len("http://:") :]
+    if raw.startswith("https://:"):
+        raw = "https://127.0.0.1:" + raw[len("https://:") :]
+    return raw.rstrip("/")
+
+
+def _join_url(base, suffix):
+    base = base.rstrip("/")
+    if not suffix.startswith("/"):
+        suffix = "/" + suffix
+    return base + suffix
+
+
+def _derive_metrics_url(worker_url):
+    if not worker_url:
+        return ""
+    return _join_url(worker_url, "/metrics")
+
+
+def _derive_health_url(metrics_url):
+    if not metrics_url:
+        return ""
+    trimmed = metrics_url.rstrip("/")
+    if trimmed.endswith("/metrics"):
+        trimmed = trimmed[: -len("/metrics")]
+    return _join_url(trimmed, "/healthz")
+
+
+def _derive_events_url(worker_url):
+    if not worker_url:
+        return ""
+    return _join_url(worker_url, "/events")
+
+
+def _public_worker_config():
+    worker_url = _get_tui_setting("REPROQ_TUI_WORKER_URL")
+    metrics_url = _get_tui_setting("REPROQ_TUI_WORKER_METRICS_URL")
+    health_url = _get_tui_setting("REPROQ_TUI_WORKER_HEALTH_URL")
+    events_url = _get_tui_setting("REPROQ_TUI_EVENTS_URL")
+    if not worker_url and metrics_url:
+        trimmed = metrics_url.rstrip("/")
+        if trimmed.endswith("/metrics"):
+            worker_url = trimmed[: -len("/metrics")]
+    if worker_url and not metrics_url:
+        metrics_url = _derive_metrics_url(worker_url)
+    if metrics_url and not health_url:
+        health_url = _derive_health_url(metrics_url)
+    if worker_url and not events_url:
+        events_url = _derive_events_url(worker_url)
+
+    payload = {}
+    if worker_url:
+        payload["worker_url"] = worker_url
+    if metrics_url:
+        payload["worker_metrics_url"] = metrics_url
+    if health_url:
+        payload["worker_health_url"] = health_url
+    if events_url:
+        payload["events_url"] = events_url
+    return payload
+
+
+def get_tui_internal_endpoints():
+    internal = _get_tui_setting("REPROQ_TUI_WORKER_INTERNAL_URL")
+    if not internal:
+        internal = _get_tui_setting("METRICS_ADDR")
+    if not internal:
+        port = _get_tui_setting("METRICS_PORT")
+        if port:
+            internal = f"127.0.0.1:{port}"
+    internal = _normalize_base_url(internal)
+    if not internal:
+        return {}
+    return {
+        "metrics": _join_url(internal, "/metrics"),
+        "health": _join_url(internal, "/healthz"),
+        "events": _join_url(internal, "/events"),
+    }
+
+
+def build_tui_config_payload(request):
+    payload = _public_worker_config()
+    if payload:
+        return payload
+    internal = get_tui_internal_endpoints()
+    if not internal:
+        return {}
+    return {
+        "worker_metrics_url": request.build_absolute_uri(reverse("reproq-tui-metrics")),
+        "worker_health_url": request.build_absolute_uri(reverse("reproq-tui-health")),
+        "events_url": request.build_absolute_uri(reverse("reproq-tui-events")),
+    }
+
+
 def _b64url(data):
     return base64.urlsafe_b64encode(data).rstrip(b"=").decode("ascii")
 
@@ -124,11 +229,13 @@ def tui_pair(request):
     cache.set(_pair_key(code), {"status": "pending", "created_at": int(time.time())}, timeout=PAIR_TTL_SECONDS)
     verify_url = request.build_absolute_uri(reverse("reproq-tui-authorize")) + f"?code={code}"
     expires_at = int(time.time()) + PAIR_TTL_SECONDS
-    return JsonResponse({
+    payload = {
         "code": code,
         "verify_url": verify_url,
         "expires_at": expires_at,
-    })
+    }
+    payload.update(build_tui_config_payload(request))
+    return JsonResponse(payload)
 
 
 def tui_pair_status(request, code):
@@ -145,6 +252,13 @@ def tui_pair_status(request, code):
             "expires_at": token_payload["expires_at"],
         })
     return JsonResponse({"status": "pending"})
+
+
+def tui_config(request):
+    if not _tui_enabled():
+        return JsonResponse({"error": "tui auth disabled"}, status=404)
+    payload = build_tui_config_payload(request)
+    return JsonResponse(payload)
 
 
 @login_required(login_url="reproq-tui-login")

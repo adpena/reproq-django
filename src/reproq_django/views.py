@@ -1,12 +1,15 @@
 import hmac
 import os
+import urllib.error
+import urllib.request
 
 from django.conf import settings
 from django.db.models import Count
-from django.http import JsonResponse
+from django.http import HttpResponse, JsonResponse, StreamingHttpResponse
+from django.views.decorators.http import require_GET
 
 from .models import TaskRun, Worker, PeriodicTask
-from .tui_auth import verify_tui_token
+from .tui_auth import get_tui_internal_endpoints, verify_tui_token
 
 AUTH_HEADER = "Authorization"
 TOKEN_HEADER = "X-Reproq-Token"
@@ -74,3 +77,89 @@ def reproq_stress_test_api(request):
         debug_noop_task.enqueue(sleep_seconds=0.1)
 
     return JsonResponse({"ok": True, "enqueued": count})
+
+
+def _proxy_target(kind):
+    endpoints = get_tui_internal_endpoints()
+    return endpoints.get(kind, "")
+
+
+def _build_proxy_request(target_url):
+    headers = {}
+    token = _get_stats_token()
+    if token:
+        headers[AUTH_HEADER] = f"Bearer {token}"
+    return urllib.request.Request(target_url, headers=headers)
+
+
+def _proxy_response(request, target_url):
+    if not target_url:
+        return JsonResponse({"error": "metrics not configured"}, status=404)
+    req = _build_proxy_request(target_url)
+    try:
+        resp = urllib.request.urlopen(req, timeout=5)
+    except urllib.error.HTTPError as err:
+        body = err.read()
+        content_type = err.headers.get("Content-Type", "text/plain")
+        return HttpResponse(body, status=err.code, content_type=content_type)
+    except urllib.error.URLError:
+        return JsonResponse({"error": "metrics proxy failed"}, status=502)
+    body = resp.read()
+    content_type = resp.headers.get("Content-Type", "text/plain")
+    return HttpResponse(body, status=resp.status, content_type=content_type)
+
+
+def _stream_response(resp):
+    try:
+        while True:
+            chunk = resp.read(1024)
+            if not chunk:
+                break
+            yield chunk
+    finally:
+        resp.close()
+
+
+def _proxy_stream(request, target_url):
+    if not target_url:
+        return JsonResponse({"error": "events not configured"}, status=404)
+    req = _build_proxy_request(target_url)
+    try:
+        resp = urllib.request.urlopen(req, timeout=5)
+    except urllib.error.HTTPError as err:
+        body = err.read()
+        content_type = err.headers.get("Content-Type", "text/plain")
+        return HttpResponse(body, status=err.code, content_type=content_type)
+    except urllib.error.URLError:
+        return JsonResponse({"error": "events proxy failed"}, status=502)
+    response = StreamingHttpResponse(_stream_response(resp), status=resp.status)
+    response["Content-Type"] = resp.headers.get("Content-Type", "text/event-stream")
+    response["Cache-Control"] = "no-cache"
+    response["X-Accel-Buffering"] = "no"
+    return response
+
+
+@require_GET
+def reproq_tui_metrics_proxy(request):
+    if not _authorized(request):
+        return JsonResponse({"error": "Unauthorized"}, status=403)
+    target_url = _proxy_target("metrics")
+    return _proxy_response(request, target_url)
+
+
+@require_GET
+def reproq_tui_health_proxy(request):
+    if not _authorized(request):
+        return JsonResponse({"error": "Unauthorized"}, status=403)
+    target_url = _proxy_target("health")
+    return _proxy_response(request, target_url)
+
+
+@require_GET
+def reproq_tui_events_proxy(request):
+    if not _authorized(request):
+        return JsonResponse({"error": "Unauthorized"}, status=403)
+    target_url = _proxy_target("events")
+    if target_url and request.META.get("QUERY_STRING"):
+        target_url = f"{target_url}?{request.META.get('QUERY_STRING')}"
+    return _proxy_stream(request, target_url)

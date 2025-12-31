@@ -158,7 +158,7 @@ wheels = [
 
 [[package]]
 name = "reproq-django"
-version = "0.1.513"
+version = "0.1.514"
 source = { editable = "." }
 dependencies = [
     { name = "django" },
