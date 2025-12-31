@@ -152,6 +152,9 @@ class TestManagementCommands(unittest.TestCase):
         with self.assertRaises(CommandError):
             call_command("reproq", "pg-cron")
 
+    def test_pg_cron_if_supported_skips_non_postgres(self):
+        call_command("reproq", "pg-cron", "--if-supported")
+
 
 if __name__ == "__main__":
     unittest.main()

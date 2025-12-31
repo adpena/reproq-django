@@ -57,6 +57,11 @@ When modifying the Django models or backend logic, ensure compatibility with the
 Always run tests via `uv` to ensure the locked environment is used:
 `uv run pytest`.
 
+## Render Env Var Safety
+The Render API `PUT /services/{id}/env-vars` replaces the full env var set.
+Always list the current env vars first, compare against `render.yaml`, and only
+then apply changes so you do not wipe required keys.
+
 ## LLM Introspection Guide
 If you are an AI agent analyzing this project:
 - **CLI Entry Point**: `src/reproq_django/management/commands/reproq.py`. This is the single source of truth for worker management.

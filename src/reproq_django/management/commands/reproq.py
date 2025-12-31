@@ -76,6 +76,11 @@ class Command(BaseCommand):
             action="store_true",
             help="Print actions without executing",
         )
+        pgcron_parser.add_argument(
+            "--if-supported",
+            action="store_true",
+            help="Skip if pg_cron is unavailable (non-Postgres or extension missing)",
+        )
 
         # Migrate
         subparsers.add_parser("migrate-worker", help="Apply Go worker SQL optimizations")
@@ -1288,7 +1293,11 @@ WantedBy=multi-user.target
             self.stderr.write(self.style.ERROR(f"Error running {cmd}: {e}"))
 
     def run_pg_cron(self, options):
+        if_supported = options.get("if_supported")
         if connection.vendor != "postgresql":
+            if if_supported:
+                self.stdout.write("pg-cron unavailable (non-Postgres database); skipping.")
+                return
             raise CommandError("pg-cron requires a PostgreSQL database.")
 
         install = options.get("install")
@@ -1305,7 +1314,18 @@ WantedBy=multi-user.target
             tables = set(connection.introspection.table_names(cursor))
             if "periodic_tasks" not in tables:
                 raise CommandError("Missing periodic_tasks table. Run migrations first.")
-            self._ensure_pg_cron_extensions(cursor, dry_run)
+            if not self._pg_cron_available(cursor):
+                if if_supported:
+                    self.stdout.write("pg-cron extension not available; skipping.")
+                    return
+                raise CommandError("pg_cron extension is not available on this database.")
+            try:
+                self._ensure_pg_cron_extensions(cursor, dry_run)
+            except CommandError:
+                if if_supported:
+                    self.stdout.write(self.style.WARNING("pg-cron could not be enabled; skipping."))
+                    return
+                raise
             supports_named = self._pg_cron_supports_named_jobs(cursor)
             if remove:
                 self._unschedule_pg_cron_jobs(cursor, prefix, supports_named, dry_run)
@@ -1315,6 +1335,12 @@ WantedBy=multi-user.target
             self._ensure_pg_cron_function(cursor, dry_run)
             self._unschedule_pg_cron_jobs(cursor, prefix, supports_named, dry_run)
             self._schedule_pg_cron_jobs(cursor, prefix, supports_named, dry_run)
+
+    def _pg_cron_available(self, cursor):
+        cursor.execute(
+            "SELECT COUNT(*) FROM pg_available_extensions WHERE name = 'pg_cron';"
+        )
+        return cursor.fetchone()[0] > 0
 
     def _ensure_pg_cron_extensions(self, cursor, dry_run):
         if dry_run:

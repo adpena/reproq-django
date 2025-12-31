@@ -228,7 +228,8 @@ scheduler per database:
 - **pg_cron**: `python manage.py reproq pg-cron --install` (Postgres-native)
 
 If you choose pg_cron, run `reproq pg-cron --install` after every deploy or
-migration to keep schedules in sync.
+migration to keep schedules in sync. On managed platforms, prefer
+`--if-supported` so deploys do not fail if pg_cron is unavailable.
 
 ### Create a Schedule (Admin or ORM)
 You can manage schedules in the Django Admin under "Reproq Django" or via code.

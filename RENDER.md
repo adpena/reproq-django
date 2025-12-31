@@ -113,7 +113,7 @@ Recommended Render pre-deploy hook when using pg_cron:
 preDeployCommand: |
   uv run python manage.py reproq migrate-worker
   uv run python manage.py migrate --noinput
-  uv run python manage.py reproq pg-cron --install
+  uv run python manage.py reproq pg-cron --install --if-supported
 ```
 
 If `pg_cron` is not available, the command will fail. Verify support with:
@@ -159,3 +159,5 @@ For Python/Django memory tuning on small instances:
 - Use `--max-requests` + jitter to recycle Gunicorn workers (limits fragmentation over long uptimes).
 - Avoid `--preload` unless you have headroom; preload can spike RSS on small plans.
 - Enable `LOW_MEMORY_MODE=1` to disable metrics/events/health endpoints when needed.
+  When `LOW_MEMORY_MODE=1` is set, the supervisor will skip running beat so you
+  can rely on pg_cron instead.

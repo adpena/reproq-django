@@ -126,7 +126,11 @@ python manage.py reproq pg-cron --remove
 ```
 
 Run `reproq pg-cron --install` after every deploy or migration so the cron
-jobs stay in sync with the `PeriodicTask` table.
+jobs stay in sync with the `PeriodicTask` table. On platforms where `pg_cron`
+is not guaranteed, use `--if-supported` to skip cleanly:
+```bash
+python manage.py reproq pg-cron --install --if-supported
+```
 
 Verify the extension is available:
 ```sql

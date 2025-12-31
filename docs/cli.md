@@ -55,6 +55,11 @@ Remove schedules:
 python manage.py reproq pg-cron --remove
 ```
 
+If you want deployments to succeed even when `pg_cron` is unavailable, use:
+```bash
+python manage.py reproq pg-cron --install --if-supported
+```
+
 ## install
 Download (or build) the worker binary.
 

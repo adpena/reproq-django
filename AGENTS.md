@@ -20,3 +20,8 @@ As an agent working on `reproq-django`, you must adhere to the following standar
 - Adhere to the migration policy: keep exactly one migration file in `src/reproq_django/migrations/` unless absolutely necessary.
 - Update version strings together (`pyproject.toml` and `src/reproq_django/__init__.py`) when releasing.
 - Retain only three tags/releases at any time; delete older tags/releases and their artifacts.
+
+## 5. Render Env Var Safety
+- The Render API `PUT /services/{id}/env-vars` **replaces the entire env var set**.
+- Always `GET` the current env vars first, compare with `render.yaml`, and only then apply changes.
+- Never assume a partial update; verify you are not deleting required keys (e.g., `PYTHON_VERSION`, `DATABASE_URL`).
