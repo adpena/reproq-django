@@ -62,6 +62,10 @@ class TaskRun(models.Model):
         permissions = [
             ("can_replay_taskrun", "Can replay task run"),
         ]
+        indexes = [
+            models.Index(fields=["status"]),
+            models.Index(fields=["queue_name", "status"]),
+        ]
 
     def __str__(self):
         return f"{self.result_id} ({self.status})"

@@ -1764,7 +1764,6 @@ WantedBy=multi-user.target
                 "exec_timeout": "1h",
                 "max_attempts_default": 3,
                 "shutdown_timeout": "30s",
-                "health_addr": ":8080",
                 "priority_aging_factor": 60,
             },
             "beat": {
@@ -1846,9 +1845,6 @@ WantedBy=multi-user.target
 
         if os.environ.get("REPROQ_LOGS_DIR"):
             set_path(["worker", "logs_dir"], os.environ["REPROQ_LOGS_DIR"])
-
-        if os.environ.get("HEALTH_ADDR"):
-            set_path(["worker", "health_addr"], os.environ["HEALTH_ADDR"])
 
         if os.environ.get("PRIORITY_AGING_FACTOR"):
             value = parse_float(os.environ["PRIORITY_AGING_FACTOR"], "PRIORITY_AGING_FACTOR")

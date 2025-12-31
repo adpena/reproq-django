@@ -472,13 +472,13 @@ When you include `reproq_django.urls` in your project, `GET /stats/` returns
 JSON task counts, per-queue task counts, worker records, and periodic task
 schedules. Access is granted to staff sessions or an API token.
 
-Configure a token via `REPROQ_STATS_TOKEN` (settings or env). For convenience,
-if it is unset, Reproq also accepts `METRICS_AUTH_TOKEN`.
+Configure a token via `METRICS_AUTH_TOKEN` (settings or env). The stats endpoint
+also accepts signed TUI JWTs (when `REPROQ_TUI_SECRET` is set).
 
 Example:
 
 ```bash
-curl -H "Authorization: Bearer $REPROQ_STATS_TOKEN" https://your-app/reproq/stats/
+curl -H "Authorization: Bearer $METRICS_AUTH_TOKEN" https://your-app/reproq/stats/
 ```
 
 You may also send `X-Reproq-Token: <token>`.

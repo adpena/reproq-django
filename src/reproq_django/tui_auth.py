@@ -108,6 +108,8 @@ def get_tui_internal_endpoints():
         port = _get_tui_setting("METRICS_PORT")
         if port:
             internal = f"127.0.0.1:{port}"
+    if not internal:
+        internal = "127.0.0.1:9090"
     internal = _normalize_base_url(internal)
     if not internal:
         return {}
