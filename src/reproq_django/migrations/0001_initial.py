@@ -160,5 +160,40 @@ class Migration(migrations.Migration):
                 "permissions": [("can_replay_taskrun", "Can replay task run")],
             },
         ),
+        migrations.CreateModel(
+            name="WorkflowRun",
+            fields=[
+                ("workflow_id", models.UUIDField(primary_key=True, serialize=False)),
+                ("expected_count", models.IntegerField()),
+                ("success_count", models.IntegerField(default=0)),
+                ("failure_count", models.IntegerField(default=0)),
+                ("callback_result_id", models.BigIntegerField(blank=True, null=True)),
+                ("status", models.TextField(default="RUNNING")),
+                ("created_at", models.DateTimeField()),
+                ("updated_at", models.DateTimeField()),
+            ],
+            options={
+                "verbose_name": "Workflow Run",
+                "verbose_name_plural": "Workflow Runs",
+                "db_table": "workflow_runs",
+                "managed": False,
+            },
+        ),
+        migrations.CreateModel(
+            name="RateLimit",
+            fields=[
+                ("key", models.TextField(primary_key=True, serialize=False)),
+                ("tokens_per_second", models.FloatField()),
+                ("burst_size", models.IntegerField()),
+                ("current_tokens", models.FloatField()),
+                ("last_refilled_at", models.DateTimeField()),
+            ],
+            options={
+                "verbose_name": "Rate Limit",
+                "verbose_name_plural": "Rate Limits",
+                "db_table": "rate_limits",
+                "managed": False,
+            },
+        ),
         migrations.RunPython(ensure_task_path_guard, migrations.RunPython.noop),
     ]
