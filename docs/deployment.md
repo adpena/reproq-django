@@ -90,6 +90,7 @@ repo before starting the worker.
 ## 2a. Metrics & Health Hardening
 If you enable metrics (via `--metrics-port` or `--metrics-addr`), secure the endpoint:
 - Bind to localhost or a private interface (for example `--metrics-addr 127.0.0.1:9090`).
+- Set `METRICS_AUTH_TOKEN` to require a bearer token.
 - Optionally set `METRICS_ALLOW_CIDRS` to restrict access by IP or CIDR.
 
 ## 3. Worker Concurrency

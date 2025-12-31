@@ -1,9 +1,12 @@
+import hmac
 import logging
+import os
 import socket
 import time
 import urllib.error
 import urllib.request
 
+from django.conf import settings
 from django.db.models import Count
 from django.http import HttpResponse, JsonResponse, StreamingHttpResponse
 from django.views.decorators.http import require_GET
@@ -17,18 +20,26 @@ from .tui_auth import (
 )
 
 AUTH_HEADER = "Authorization"
+TOKEN_HEADER = "X-Reproq-Token"
 logger = logging.getLogger(__name__)
+
+
+def _get_stats_token():
+    return getattr(settings, "METRICS_AUTH_TOKEN", "") or os.environ.get("METRICS_AUTH_TOKEN", "")
 
 
 def _token_from_request(request):
     auth = request.headers.get(AUTH_HEADER, "")
     if auth.lower().startswith("bearer "):
         return auth.split(" ", 1)[1].strip()
-    return ""
+    return request.headers.get(TOKEN_HEADER, "")
 
 
 def _authorized(request):
+    token = _get_stats_token()
     candidate = _token_from_request(request)
+    if token and candidate and hmac.compare_digest(candidate, token):
+        return True
     if candidate and verify_tui_token(candidate):
         return True
     return request.user.is_authenticated and request.user.is_staff
@@ -134,9 +145,13 @@ def _proxy_target(kind):
 
 def _build_proxy_request(target_url, request):
     headers = {}
-    incoming = request.headers.get(AUTH_HEADER, "")
-    if incoming:
-        headers[AUTH_HEADER] = incoming
+    token = _get_stats_token()
+    if token:
+        headers[AUTH_HEADER] = f"Bearer {token}"
+    else:
+        incoming = request.headers.get(AUTH_HEADER, "")
+        if incoming:
+            headers[AUTH_HEADER] = incoming
     return urllib.request.Request(target_url, headers=headers)
 
 

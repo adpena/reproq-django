@@ -673,6 +673,8 @@ class Command(BaseCommand):
         env_lines = []
         if options.get("env_file"):
             env_lines.append(f"EnvironmentFile={options['env_file']}")
+        if options.get("metrics_auth_token"):
+            env_lines.append(self._render_env("METRICS_AUTH_TOKEN", options["metrics_auth_token"]))
         if options.get("metrics_allow_cidrs"):
             env_lines.append(self._render_env("METRICS_ALLOW_CIDRS", options["metrics_allow_cidrs"]))
 
@@ -2105,6 +2107,9 @@ WantedBy=multi-user.target
 
         if os.environ.get("METRICS_ADDR"):
             set_path(["metrics", "addr"], os.environ["METRICS_ADDR"])
+
+        if os.environ.get("METRICS_AUTH_TOKEN"):
+            set_path(["metrics", "auth_token"], os.environ["METRICS_AUTH_TOKEN"])
 
         if os.environ.get("METRICS_ALLOW_CIDRS"):
             set_path(

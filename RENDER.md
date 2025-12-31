@@ -131,6 +131,8 @@ Ensure the following variables are set in your Render environment:
 - `REPROQ_WORKER_BIN`: (Optional) Defaults to `src/reproq_django/bin/reproq`.
 - `ALLOWED_TASK_MODULES`: (Optional) Allow-list for task module prefixes. If unset, `python manage.py reproq worker` auto-configures it from discovered task modules.
 - `REPROQ_LOGS_DIR`: (Optional) Directory to persist worker stdout/stderr logs (updates `task_runs.logs_uri`).
+- `METRICS_AUTH_TOKEN`: (Optional) Bearer token for health/metrics/events and TUI auth signing.
+- `METRICS_ALLOW_CIDRS`: (Optional) Comma-separated IP/CIDR allow-list for health/metrics.
 - `METRICS_TLS_CERT`: (Optional) TLS certificate path for health/metrics.
 - `METRICS_TLS_KEY`: (Optional) TLS private key path for health/metrics.
 - `METRICS_TLS_CLIENT_CA`: (Optional) Client CA bundle to require mTLS for health/metrics.

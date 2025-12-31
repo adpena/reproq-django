@@ -479,14 +479,17 @@ The `python manage.py reproq` command is your Swiss Army knife.
 
 When you include `reproq_django.urls` in your project, `GET /stats/` returns
 JSON task counts, per-queue task counts, worker records, and periodic task
-schedules. Access is granted to staff sessions or a signed TUI JWT.
+schedules. Access is granted to staff sessions, a signed TUI JWT, or
+`METRICS_AUTH_TOKEN` as a bearer token.
 
 ## 🧭 TUI Integration
 
-The TUI login flow signs JWTs with your Django `SECRET_KEY`, so no additional
-secrets are required. If you do not want to expose SSE, set
+Set `METRICS_AUTH_TOKEN` to enable the TUI login flow and sign TUI JWTs. This
+token is also accepted as a bearer token for `/reproq/stats/` and is forwarded
+to the worker metrics proxy endpoints. If you do not want to expose SSE, set
 `REPROQ_TUI_DISABLE_EVENTS=1` to omit the `/reproq/tui/events/` stream from the
 TUI config payload.
+If `METRICS_AUTH_TOKEN` is unset, the TUI auth endpoints return 404.
 
 Set `LOW_MEMORY_MODE=1` to disable the worker proxy endpoints
 (`/reproq/tui/metrics/`, `/reproq/tui/healthz/`, `/reproq/tui/events/`). The
@@ -546,7 +549,7 @@ python manage.py reproq systemd --user myuser --concurrency 20
 ```
 
 This generates `reproq-worker.service` and `reproq-beat.service`. Copy them to `/etc/systemd/system/` and enable them.
-You can pass metrics flags (for example `--metrics-addr 127.0.0.1:9090`) or use `--env-file` to load `METRICS_ALLOW_CIDRS`.
+You can pass metrics flags (for example `--metrics-addr 127.0.0.1:9090`) or use `--env-file` to load `METRICS_AUTH_TOKEN` and `METRICS_ALLOW_CIDRS`.
 
 ### Env Vars
 The Go worker relies on standard environment variables:
@@ -556,6 +559,7 @@ The Go worker relies on standard environment variables:
 - `REPROQ_CONFIG`: (Optional) Path to a YAML/TOML worker/beat config file.
 - `ALLOWED_TASK_MODULES`: (Optional) Comma-separated task module allow-list for the worker. If unset, `manage.py reproq worker` auto-configures it from discovered task modules.
 - `REPROQ_LOGS_DIR`: (Optional) Directory to persist worker stdout/stderr logs (updates `task_runs.logs_uri`).
+- `METRICS_AUTH_TOKEN`: (Optional) Bearer token for `/metrics`, `/healthz`, and `/events`.
 - `METRICS_ALLOW_CIDRS`: (Optional) Comma-separated IP/CIDR allow-list for metrics/health.
 - `METRICS_TLS_CERT`: (Optional) TLS certificate path for health/metrics.
 - `METRICS_TLS_KEY`: (Optional) TLS private key path for health/metrics.

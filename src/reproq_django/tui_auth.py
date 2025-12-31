@@ -20,7 +20,7 @@ TOKEN_TTL_SECONDS = 30 * 24 * 60 * 60
 
 
 def _get_tui_secret():
-    return getattr(settings, "SECRET_KEY", "")
+    return getattr(settings, "METRICS_AUTH_TOKEN", "") or os.environ.get("METRICS_AUTH_TOKEN", "")
 
 
 def _tui_enabled():
