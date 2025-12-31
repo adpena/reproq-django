@@ -340,7 +340,9 @@ We standardize on Python 3.12.x for local development.
 
 ```bash
 bash scripts/dev_bootstrap.sh
+uv run pytest
 ```
+Always run tests with `uv run pytest` so dependencies and settings stay consistent.
 
 ---
 

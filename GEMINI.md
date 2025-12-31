@@ -44,6 +44,10 @@ To trigger immediately, set `next_run_at = timezone.now()` or call `enqueue()` o
 ## Developer Note
 When modifying the Django models or backend logic, ensure compatibility with the Go worker's claiming SQL (found in `reproq-worker/internal/queue/queue.go`).
 
+## Testing
+Always run tests via `uv` to ensure the locked environment is used:
+`uv run pytest`.
+
 ## LLM Introspection Guide
 If you are an AI agent analyzing this project:
 - **CLI Entry Point**: `src/reproq_django/management/commands/reproq.py`. This is the single source of truth for worker management.
