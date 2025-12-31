@@ -4,12 +4,12 @@ Reproq is designed for stability in production environments. Follow these guidel
 
 ## 0. Deployment Options
 
-**Option A (Recommended): Separate worker + beat processes**
-- Run `python manage.py reproq worker` and `python manage.py reproq beat` as dedicated processes.
+**Option A (Recommended): Separate worker + scheduler processes**
+- Run `python manage.py reproq worker` and either `python manage.py reproq beat` or `python manage.py reproq pg-cron --install`.
 - Use a supervisor (systemd, supervisor, or separate container/services) so they restart automatically.
 
-**Option B: Single-service (web + worker + beat)**
-- Run the worker and beat in the same service as your web process.
+**Option B: Single-service (web + worker + scheduler)**
+- Run the worker and beat in the same service as your web process (or use `pg-cron` and omit beat).
 - Simpler to deploy, but less reliable: background processes are not supervised and can die silently.
 
 Example single-service start command:
@@ -35,7 +35,7 @@ python manage.py reproq systemd --concurrency 20
 
 To bake metrics settings into the unit files:
 ```bash
-python manage.py reproq systemd --metrics-addr 127.0.0.1:9090 --metrics-auth-token "$METRICS_AUTH_TOKEN" --metrics-allow-cidrs "127.0.0.1/32"
+python manage.py reproq systemd --metrics-addr 127.0.0.1:9090 --metrics-allow-cidrs "127.0.0.1/32"
 ```
 
 You can also provide an environment file:
@@ -90,7 +90,6 @@ repo before starting the worker.
 ## 2a. Metrics & Health Hardening
 If you enable metrics (via `--metrics-port` or `--metrics-addr`), secure the endpoint:
 - Bind to localhost or a private interface (for example `--metrics-addr 127.0.0.1:9090`).
-- Set `METRICS_AUTH_TOKEN` to require a bearer token.
 - Optionally set `METRICS_ALLOW_CIDRS` to restrict access by IP or CIDR.
 
 ## 3. Worker Concurrency
@@ -105,13 +104,24 @@ python manage.py reproq worker --concurrency 50
 
 Queue selection uses `--queues` (comma-separated). The legacy `--queue` flag remains for compatibility but is deprecated.
 
-## 4. Periodic Tasks (Beat)
+## 4. Periodic Tasks (Beat or pg_cron)
 
-**CRITICAL**: Only run **one instance** of the `beat` process per database. Running multiple instances will result in tasks being scheduled multiple times.
+**CRITICAL**: Only run **one scheduler** per database. Running multiple schedulers will result in tasks being scheduled multiple times.
 
-Start beat as a dedicated process (recommended):
+### Option A: Beat
+Start beat as a dedicated process (recommended when pg_cron is unavailable):
 ```bash
 python manage.py reproq beat --interval 30s
+```
+
+### Option B: pg_cron
+If your database supports `pg_cron`, install schedules with:
+```bash
+python manage.py reproq pg-cron --install
+```
+Remove schedules with:
+```bash
+python manage.py reproq pg-cron --remove
 ```
 
 Create schedules in Django Admin or via the ORM:

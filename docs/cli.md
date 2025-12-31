@@ -43,6 +43,18 @@ Start the periodic task scheduler. Run exactly one beat process per database.
 python manage.py reproq beat --interval 30s
 ```
 
+## pg-cron
+Sync Postgres-native schedules via `pg_cron` (optional).
+
+```bash
+python manage.py reproq pg-cron --install
+```
+
+Remove schedules:
+```bash
+python manage.py reproq pg-cron --remove
+```
+
 ## install
 Download (or build) the worker binary.
 

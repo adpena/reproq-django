@@ -17,10 +17,10 @@ Reproq follows a "split-brain" architecture to maximize both developer productiv
    - Executes tasks by invoking `python -m reproq_django.executor`.
    - Handles heartbeats to ensure the system knows it's alive and can recover from crashes.
 
-3. **Reproq Beat (The Scheduler)**
-   - A lightweight Python process that scans `periodic_tasks`.
-   - Enqueues due schedules into `task_runs`.
-   - Only one beat process should run per database.
+3. **Reproq Scheduler (Beat or pg_cron)**
+   - Beat: a lightweight Python process that scans `periodic_tasks`.
+   - pg_cron: a Postgres-native scheduler that calls `reproq_enqueue_periodic_task`.
+   - Only one scheduler should run per database.
 
 4. **PostgreSQL (The Broker)**
    - Reproq is "Postgres-native."
@@ -36,15 +36,15 @@ Reproq follows a "split-brain" architecture to maximize both developer productiv
 
 ## Periodic Scheduling Flow
 1. **Schedule**: A `PeriodicTask` row defines `cron_expr`, `task_path`, and optional `queue_name`.
-2. **Scan**: The `reproq beat` process scans for schedules due to run.
-3. **Enqueue**: Beat inserts a corresponding `task_runs` row in `READY` state.
+2. **Scan**: Beat polls for due schedules or pg_cron triggers per cron expression.
+3. **Enqueue**: The scheduler inserts a corresponding `task_runs` row in `READY` state.
 
 ## Data Flow Diagram
 ```
 Producer code      PeriodicTask
     |                  |
     v                  v
-  task_runs  <----  reproq beat
+  task_runs  <----  beat/pg_cron
     |
     v
 reproq worker ---> python -m reproq_django.executor

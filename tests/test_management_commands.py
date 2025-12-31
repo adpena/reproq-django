@@ -26,6 +26,7 @@ if not settings.configured:
     django.setup()
 
 from django.core.management import call_command
+from django.core.management.base import CommandError
 from reproq_django.models import TaskRun
 from reproq_django.management.commands.reproq import Command
 
@@ -146,6 +147,10 @@ class TestManagementCommands(unittest.TestCase):
             self.assertEqual(config_data["worker"]["concurrency"], 7)
         finally:
             os.unlink(config_path)
+
+    def test_pg_cron_requires_postgres(self):
+        with self.assertRaises(CommandError):
+            call_command("reproq", "pg-cron")
 
 
 if __name__ == "__main__":

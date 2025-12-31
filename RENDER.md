@@ -44,7 +44,7 @@ startCommand: >
   export REPROQ_PRESTART_CMD='uv run python manage.py reproq check';
   export REPROQ_PRESTART_INTERVAL_SECONDS='5';
   export REPROQ_PRESTART_MAX_WAIT_SECONDS='120';
-  export REPROQ_WEB_CMD='uv run gunicorn myproj.wsgi:application --preload --workers=${WEB_CONCURRENCY:-1}';
+  export REPROQ_WEB_CMD='uv run gunicorn myproj.wsgi:application --workers=${WEB_CONCURRENCY:-1}';
   render_start=$(uv run python -c 'import importlib.resources as r; print(r.files("reproq_django.resources").joinpath("render_start.sh"))');
   bash \"$render_start\"
   "
@@ -76,8 +76,11 @@ Add this to your `render.yaml`:
           property: connectionString
 ```
 
-## 3. Beat Service (Optional)
-If you use periodic tasks, you need exactly one instance of the `beat` process. You can run this as another background worker:
+## 3. Periodic Tasks: Beat or pg_cron
+If you use periodic tasks, choose **one** scheduler:
+
+### Option A: Beat Service
+Run exactly one instance of the `beat` process. You can run this as another background worker:
 
 ```yaml
   - type: worker
@@ -90,6 +93,18 @@ If you use periodic tasks, you need exactly one instance of the `beat` process. 
         fromDatabase:
           name: your-db-name
           property: connectionString
+```
+
+### Option B: pg_cron
+If your Postgres supports `pg_cron`, install schedules in-app:
+
+```bash
+uv run python manage.py reproq pg-cron --install
+```
+
+To remove schedules:
+```bash
+uv run python manage.py reproq pg-cron --remove
 ```
 
 ### Seeding Periodic Tasks

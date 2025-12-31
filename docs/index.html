@@ -118,9 +118,10 @@ python manage.py migrate --noinput</pre>
                 <h4 class="font-bold mt-4">6. Run the Worker</h4>
                 <pre>python manage.py reproq worker</pre>
 
-                <h4 class="font-bold mt-4">7. (Optional) Run Beat</h4>
-                <p>Run exactly one beat process per database if you use periodic tasks.</p>
-                <pre>python manage.py reproq beat</pre>
+                <h4 class="font-bold mt-4">7. (Optional) Schedule Periodic Tasks</h4>
+                <p>Choose one scheduler: beat or pg_cron.</p>
+                <pre>python manage.py reproq beat
+python manage.py reproq pg-cron --install</pre>
             </section>
 
             <section id="management" class="mb-16 prose prose-slate max-w-none">
@@ -130,6 +131,7 @@ python manage.py migrate --noinput</pre>
                     <li><strong>init</strong>: Write <code>reproq.yaml</code>/<code>reproq.toml</code>, install the worker, and run migrations.</li>
                     <li><strong>worker</strong>: Start the Go worker process.</li>
                     <li><strong>beat</strong>: Start the periodic task scheduler (one per database).</li>
+                    <li><strong>pg-cron</strong>: Sync Postgres-native schedules via <code>pg_cron</code>.</li>
                     <li><strong>migrate-worker</strong>: Apply worker indexes and schema helpers.</li>
                     <li><strong>doctor</strong>: Validate DSN, schema, worker binary, and allowlist health.</li>
                     <li><strong>config --explain</strong>: Print the effective config with precedence.</li>
@@ -147,7 +149,7 @@ python manage.py migrate --noinput</pre>
                 <ul>
                     <li><strong>Reproq Django (The Brain)</strong>: Responsible for task definition, enqueuing, and the monitoring UI.</li>
                     <li><strong>Reproq Worker (The Muscle)</strong>: A standalone Go binary that polls PostgreSQL and executes tasks in isolated processes.</li>
-                    <li><strong>Beat (The Scheduler)</strong>: A lightweight process that reads <code>PeriodicTask</code> rows and enqueues due work.</li>
+                    <li><strong>Scheduler (Beat or pg_cron)</strong>: Either a lightweight beat process or Postgres-native cron jobs.</li>
                     <li><strong>PostgreSQL (The Broker)</strong>: The single source of truth for task state and worker health.</li>
                 </ul>
             </section>
@@ -223,7 +225,7 @@ def send_welcome_email(user_id, **_kwargs):
 
             <section id="periodic" class="mb-16 prose prose-slate max-w-none">
                 <h2 class="text-3xl font-bold mb-6">Periodic Tasks</h2>
-                <p>Manage cron schedules directly from the Django Admin or using the <code>PeriodicTask</code> model. Ensure the <code>reproq beat</code> process is running to trigger them.</p>
+                <p>Manage cron schedules directly from the Django Admin or using the <code>PeriodicTask</code> model. Run either <code>reproq beat</code> or <code>reproq pg-cron</code> to trigger them.</p>
                 <pre>from django.utils import timezone
 from reproq_django.models import PeriodicTask
 
@@ -271,7 +273,7 @@ PeriodicTask.objects.update_or_create(
                 <p class="text-slate-600 mb-6 text-lg">Reproq is production-ready and includes automated tools for Linux systemd configuration.</p>
                 <p class="text-slate-600 mb-4 text-sm">For deploy-time tasks (like deploy notifications), enqueue them after the worker starts and guard with a deploy ID (for example, RENDER_DEPLOY_ID) so old workers do not claim them.</p>
                 <p class="text-slate-600 mb-4 text-sm">If a worker crashes mid-task, reclaim stale leases with <code>python manage.py reproq reclaim --older-than 5m --action requeue</code>.</p>
-                <p class="text-slate-600 mb-4 text-sm">If you expose metrics, bind to localhost or a private interface and set <code>METRICS_AUTH_TOKEN</code>. Use <code>METRICS_ALLOW_CIDRS</code> to restrict access by IP/CIDR.</p>
+                <p class="text-slate-600 mb-4 text-sm">If you expose metrics, bind to localhost or a private interface. Use <code>METRICS_ALLOW_CIDRS</code> to restrict access by IP/CIDR.</p>
                 
                 <div class="bg-slate-50 border border-slate-200 rounded-2xl p-8">
                     <h4 class="font-bold text-slate-800 mb-2">Automated systemd setup</h4>

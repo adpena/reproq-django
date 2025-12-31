@@ -103,11 +103,19 @@ It also backfills `task_path` in batches and ensures the `task_runs_task_path_no
 python manage.py reproq worker
 ```
 
-### 8. (Optional) Start Beat for Periodic Tasks
-Run exactly one beat process per database if you use periodic tasks:
+### 8. (Optional) Schedule Periodic Tasks
+You have two options (choose one):
+
+**Option A: Run Beat (one process per database)**
 ```bash
 python manage.py reproq beat
 ```
+
+**Option B: Use Postgres-native scheduling (pg_cron)**
+```bash
+python manage.py reproq pg-cron --install
+```
+`pg_cron` requires the Postgres extension to be enabled (see `docs/deployment.md`).
 
 ---
 
@@ -448,6 +456,7 @@ The `python manage.py reproq` command is your Swiss Army knife.
 | `init` | Bootstraps Reproq in the current project. |
 | `worker` | Starts the Go worker. Flags: `--config`, `--concurrency` (default 10), `--queues`, `--allowed-task-modules`, `--logs-dir`, `--payload-mode`, `--metrics-port`, `--metrics-addr`, `--metrics-auth-token`, `--metrics-allow-cidrs`, `--metrics-tls-cert`, `--metrics-tls-key`, `--metrics-tls-client-ca`. Auto-configures allow-list when unset (unless config file is used). |
 | `beat` | Starts the scheduler. Flags: `--config`, `--interval` (default 30s). |
+| `pg-cron` | Syncs Postgres-native schedules. Flags: `--install` (default), `--remove`, `--prefix`, `--dry-run`. |
 | `install` | Downloads/builds the worker binary. |
 | `upgrade` | Upgrades the worker binary and optionally runs `migrate-worker`. |
 | `migrate-worker` | Applies essential SQL schema optimizations (indexes, extensions). |
@@ -470,31 +479,22 @@ The `python manage.py reproq` command is your Swiss Army knife.
 
 When you include `reproq_django.urls` in your project, `GET /stats/` returns
 JSON task counts, per-queue task counts, worker records, and periodic task
-schedules. Access is granted to staff sessions or an API token.
+schedules. Access is granted to staff sessions or a signed TUI JWT.
 
 ## 🧭 TUI Integration
 
-Set `REPROQ_TUI_SECRET` to enable the TUI login flow and signed JWT access.
-If you do not want to expose SSE, set `REPROQ_TUI_DISABLE_EVENTS=1` to omit
-the `/reproq/tui/events/` stream from the TUI config payload.
-
-Configure a token via `METRICS_AUTH_TOKEN` (settings or env). The stats endpoint
-also accepts signed TUI JWTs (when `REPROQ_TUI_SECRET` is set). If
-`METRICS_AUTH_TOKEN` is unset, `REPROQ_TUI_SECRET` is reused as the bearer
-token so a single secret can secure stats + TUI auth.
+The TUI login flow signs JWTs with your Django `SECRET_KEY`, so no additional
+secrets are required. If you do not want to expose SSE, set
+`REPROQ_TUI_DISABLE_EVENTS=1` to omit the `/reproq/tui/events/` stream from the
+TUI config payload.
 
 Set `LOW_MEMORY_MODE=1` to disable the worker proxy endpoints
 (`/reproq/tui/metrics/`, `/reproq/tui/healthz/`, `/reproq/tui/events/`). The
 endpoints return a 503 with a short hint while low-memory mode is enabled, and
 events are omitted from the TUI config payload.
 
-Example:
-
-```bash
-curl -H "Authorization: Bearer $METRICS_AUTH_TOKEN" https://your-app/reproq/stats/
-```
-
-You may also send `X-Reproq-Token: <token>`.
+Pass the TUI JWT in the `Authorization: Bearer ...` header when accessing
+these endpoints programmatically.
 
 ---
 
@@ -546,7 +546,7 @@ python manage.py reproq systemd --user myuser --concurrency 20
 ```
 
 This generates `reproq-worker.service` and `reproq-beat.service`. Copy them to `/etc/systemd/system/` and enable them.
-You can pass metrics flags (for example `--metrics-addr 127.0.0.1:9090`) or use `--env-file` to load `METRICS_AUTH_TOKEN` and `METRICS_ALLOW_CIDRS`.
+You can pass metrics flags (for example `--metrics-addr 127.0.0.1:9090`) or use `--env-file` to load `METRICS_ALLOW_CIDRS`.
 
 ### Env Vars
 The Go worker relies on standard environment variables:
@@ -556,11 +556,7 @@ The Go worker relies on standard environment variables:
 - `REPROQ_CONFIG`: (Optional) Path to a YAML/TOML worker/beat config file.
 - `ALLOWED_TASK_MODULES`: (Optional) Comma-separated task module allow-list for the worker. If unset, `manage.py reproq worker` auto-configures it from discovered task modules.
 - `REPROQ_LOGS_DIR`: (Optional) Directory to persist worker stdout/stderr logs (updates `task_runs.logs_uri`).
-- `METRICS_AUTH_TOKEN`: (Optional) Bearer token for `/metrics` and `/healthz`.
 - `METRICS_ALLOW_CIDRS`: (Optional) Comma-separated IP/CIDR allow-list for metrics/health.
-- `METRICS_AUTH_LIMIT`: (Optional) Max unauthorized requests per window (default 30).
-- `METRICS_AUTH_WINDOW`: (Optional) Rate limit window (default 1m).
-- `METRICS_AUTH_MAX_ENTRIES`: (Optional) Max tracked hosts for auth rate limiting (default 1000).
 - `METRICS_TLS_CERT`: (Optional) TLS certificate path for health/metrics.
 - `METRICS_TLS_KEY`: (Optional) TLS private key path for health/metrics.
 - `METRICS_TLS_CLIENT_CA`: (Optional) Client CA bundle to require mTLS for health/metrics.

@@ -17,7 +17,7 @@ from django.conf import settings
 from django.db import connection
 from django.db.models import Q
 from django.utils import timezone
-from ...models import TaskRun
+from ...models import PeriodicTask, TaskRun
 
 class Command(BaseCommand):
     help = "Unified Reproq management command"
@@ -49,6 +49,33 @@ class Command(BaseCommand):
         beat_parser = subparsers.add_parser("beat", help="Start the periodic task scheduler (beat)")
         beat_parser.add_argument("--config", type=str, default="", help="Path to reproq config file")
         beat_parser.add_argument("--interval", type=str, default="30s")
+
+        # PG Cron
+        pgcron_parser = subparsers.add_parser(
+            "pg-cron",
+            help="Configure Postgres-native periodic scheduling via pg_cron",
+        )
+        pgcron_parser.add_argument(
+            "--install",
+            action="store_true",
+            help="Install/sync pg_cron jobs (default)",
+        )
+        pgcron_parser.add_argument(
+            "--remove",
+            action="store_true",
+            help="Remove pg_cron jobs and helper function",
+        )
+        pgcron_parser.add_argument(
+            "--prefix",
+            type=str,
+            default="reproq_periodic",
+            help="Job name prefix for pg_cron entries",
+        )
+        pgcron_parser.add_argument(
+            "--dry-run",
+            action="store_true",
+            help="Print actions without executing",
+        )
 
         # Migrate
         subparsers.add_parser("migrate-worker", help="Apply Go worker SQL optimizations")
@@ -269,6 +296,8 @@ class Command(BaseCommand):
             self.run_prune_workers(options)
         elif subcommand == "prune-successful":
             self.run_prune_successful(options)
+        elif subcommand == "pg-cron":
+            self.run_pg_cron(options)
         elif subcommand in ["worker", "beat"]:
             self.run_worker_or_beat(subcommand, options)
 
@@ -644,16 +673,8 @@ class Command(BaseCommand):
         env_lines = []
         if options.get("env_file"):
             env_lines.append(f"EnvironmentFile={options['env_file']}")
-        if options.get("metrics_auth_token"):
-            env_lines.append(self._render_env("METRICS_AUTH_TOKEN", options["metrics_auth_token"]))
         if options.get("metrics_allow_cidrs"):
             env_lines.append(self._render_env("METRICS_ALLOW_CIDRS", options["metrics_allow_cidrs"]))
-        if options.get("metrics_auth_limit") is not None:
-            env_lines.append(self._render_env("METRICS_AUTH_LIMIT", str(options["metrics_auth_limit"])))
-        if options.get("metrics_auth_window"):
-            env_lines.append(self._render_env("METRICS_AUTH_WINDOW", options["metrics_auth_window"]))
-        if options.get("metrics_auth_max_entries") is not None:
-            env_lines.append(self._render_env("METRICS_AUTH_MAX_ENTRIES", str(options["metrics_auth_max_entries"])))
 
         env_block = ""
         if env_lines:
@@ -1264,6 +1285,231 @@ WantedBy=multi-user.target
         except Exception as e:
             self.stderr.write(self.style.ERROR(f"Error running {cmd}: {e}"))
 
+    def run_pg_cron(self, options):
+        if connection.vendor != "postgresql":
+            raise CommandError("pg-cron requires a PostgreSQL database.")
+
+        install = options.get("install")
+        remove = options.get("remove")
+        if install and remove:
+            raise CommandError("Choose either --install or --remove (not both).")
+        if not install and not remove:
+            install = True
+
+        prefix = (options.get("prefix") or "reproq_periodic").strip()
+        dry_run = options.get("dry_run")
+
+        with connection.cursor() as cursor:
+            tables = set(connection.introspection.table_names(cursor))
+            if "periodic_tasks" not in tables:
+                raise CommandError("Missing periodic_tasks table. Run migrations first.")
+            self._ensure_pg_cron_extensions(cursor, dry_run)
+            supports_named = self._pg_cron_supports_named_jobs(cursor)
+            if remove:
+                self._unschedule_pg_cron_jobs(cursor, prefix, supports_named, dry_run)
+                self._drop_pg_cron_function(cursor, dry_run)
+                return
+
+            self._ensure_pg_cron_function(cursor, dry_run)
+            self._unschedule_pg_cron_jobs(cursor, prefix, supports_named, dry_run)
+            self._schedule_pg_cron_jobs(cursor, prefix, supports_named, dry_run)
+
+    def _ensure_pg_cron_extensions(self, cursor, dry_run):
+        if dry_run:
+            self.stdout.write("dry-run: ensure extensions pgcrypto, pg_cron")
+            return
+        try:
+            cursor.execute("CREATE EXTENSION IF NOT EXISTS pgcrypto;")
+            cursor.execute("CREATE EXTENSION IF NOT EXISTS pg_cron;")
+        except Exception as exc:
+            raise CommandError(
+                "Failed to enable pg_cron. Ensure it is available and listed in "
+                "shared_preload_libraries on your Postgres server."
+            ) from exc
+
+    def _pg_cron_supports_named_jobs(self, cursor):
+        cursor.execute(
+            """
+            SELECT COUNT(*)
+            FROM pg_proc p
+            JOIN pg_namespace n ON p.pronamespace = n.oid
+            WHERE n.nspname = 'cron' AND p.proname = 'schedule' AND p.pronargs = 3
+            """
+        )
+        return cursor.fetchone()[0] > 0
+
+    def _drop_pg_cron_function(self, cursor, dry_run):
+        if dry_run:
+            self.stdout.write("dry-run: drop function reproq_enqueue_periodic_task")
+            return
+        cursor.execute("DROP FUNCTION IF EXISTS reproq_enqueue_periodic_task(TEXT);")
+
+    def _ensure_pg_cron_function(self, cursor, dry_run):
+        sql = """
+            CREATE OR REPLACE FUNCTION reproq_enqueue_periodic_task(task_name TEXT)
+            RETURNS VOID
+            LANGUAGE plpgsql
+            AS $$
+            DECLARE
+                task_row periodic_tasks%ROWTYPE;
+                args_json JSONB;
+                spec JSONB;
+                spec_hash TEXT;
+            BEGIN
+                SELECT * INTO task_row
+                FROM periodic_tasks
+                WHERE name = task_name AND enabled = TRUE;
+
+                IF NOT FOUND THEN
+                    RETURN;
+                END IF;
+
+                args_json := COALESCE(task_row.payload_json, '[]'::jsonb);
+                spec := jsonb_build_object(
+                    'task_path', task_row.task_path,
+                    'args', args_json,
+                    'kwargs', '{}'::jsonb,
+                    'periodic_name', task_row.name,
+                    'scheduled_at', to_char(NOW() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"')
+                );
+                spec_hash := encode(digest(spec::text, 'sha256'), 'hex');
+
+                INSERT INTO task_runs (
+                    backend_alias,
+                    queue_name,
+                    priority,
+                    run_after,
+                    spec_json,
+                    spec_hash,
+                    status,
+                    enqueued_at,
+                    attempts,
+                    max_attempts,
+                    timeout_seconds,
+                    wait_count,
+                    worker_ids,
+                    errors_json,
+                    cancel_requested,
+                    created_at,
+                    updated_at
+                )
+                SELECT
+                    'default',
+                    COALESCE(task_row.queue_name, 'default'),
+                    COALESCE(task_row.priority, 0),
+                    NOW(),
+                    spec,
+                    spec_hash,
+                    'READY',
+                    NOW(),
+                    0,
+                    COALESCE(NULLIF(task_row.max_attempts, 0), 3),
+                    900,
+                    0,
+                    '[]'::jsonb,
+                    '[]'::jsonb,
+                    FALSE,
+                    NOW(),
+                    NOW()
+                WHERE NOT EXISTS (
+                    SELECT 1
+                    FROM task_runs
+                    WHERE task_runs.spec_hash = spec_hash
+                      AND status IN ('READY', 'RUNNING')
+                );
+
+                UPDATE periodic_tasks
+                SET last_run_at = NOW(),
+                    updated_at = NOW()
+                WHERE name = task_row.name;
+            END;
+            $$;
+        """
+        if dry_run:
+            self.stdout.write("dry-run: create function reproq_enqueue_periodic_task")
+            return
+        cursor.execute(sql)
+
+    def _unschedule_pg_cron_jobs(self, cursor, prefix, supports_named, dry_run):
+        rows = []
+        if supports_named:
+            cursor.execute(
+                "SELECT jobid, jobname FROM cron.job WHERE jobname LIKE %s",
+                [prefix + "%"],
+            )
+            rows = cursor.fetchall()
+        else:
+            cursor.execute(
+                "SELECT jobid, command FROM cron.job WHERE command LIKE %s",
+                ["SELECT reproq_enqueue_periodic_task(%"],
+            )
+            rows = cursor.fetchall()
+
+        if not rows:
+            self.stdout.write("No existing pg_cron jobs to remove.")
+            return
+
+        for jobid, label in rows:
+            if dry_run:
+                self.stdout.write(f"dry-run: unschedule job {label} ({jobid})")
+                continue
+            cursor.execute("SELECT cron.unschedule(%s);", [jobid])
+        self.stdout.write(f"Removed {len(rows)} pg_cron job(s).")
+
+    def _schedule_pg_cron_jobs(self, cursor, prefix, supports_named, dry_run):
+        tasks = list(
+            PeriodicTask.objects.filter(enabled=True).values(
+                "name",
+                "cron_expr",
+            )
+        )
+        if not tasks:
+            self.stdout.write("No enabled periodic tasks found; nothing to schedule.")
+            return
+
+        used_names = set()
+        for task in tasks:
+            name = task["name"]
+            cron_expr = task["cron_expr"]
+            if not cron_expr:
+                self.stdout.write(f"Skipping periodic task with empty cron_expr: {name}")
+                continue
+            jobname = self._pg_cron_job_name(prefix, name)
+            while jobname in used_names:
+                jobname = self._pg_cron_job_name(
+                    prefix,
+                    f"{name}-{hashlib.sha256(jobname.encode('utf-8')).hexdigest()[:4]}",
+                )
+            used_names.add(jobname)
+            escaped = name.replace("'", "''")
+            command = f"SELECT reproq_enqueue_periodic_task('{escaped}');"
+            if dry_run:
+                self.stdout.write(
+                    f"dry-run: schedule {jobname} {cron_expr} -> {command}"
+                )
+                continue
+            if supports_named:
+                cursor.execute(
+                    "SELECT cron.schedule(%s, %s, %s);",
+                    [jobname, cron_expr, command],
+                )
+            else:
+                cursor.execute(
+                    "SELECT cron.schedule(%s, %s);",
+                    [cron_expr, command],
+                )
+        self.stdout.write(f"Scheduled {len(tasks)} pg_cron job(s).")
+
+    def _pg_cron_job_name(self, prefix, name):
+        cleaned = re.sub(r"[^a-zA-Z0-9_]+", "_", name).strip("_")
+        if not cleaned:
+            cleaned = hashlib.sha256(name.encode("utf-8")).hexdigest()[:8]
+        base = f"{prefix}_{cleaned}" if prefix else cleaned
+        if len(base) <= 63:
+            return base
+        suffix = hashlib.sha256(base.encode("utf-8")).hexdigest()[:8]
+        return f"{base[:54]}_{suffix}"
+
     def run_allowlist(self, options):
         allowed, task_paths, errors = self._compute_allowed_task_modules()
         if errors:
@@ -1860,30 +2106,11 @@ WantedBy=multi-user.target
         if os.environ.get("METRICS_ADDR"):
             set_path(["metrics", "addr"], os.environ["METRICS_ADDR"])
 
-        if os.environ.get("METRICS_AUTH_TOKEN"):
-            set_path(["metrics", "auth_token"], os.environ["METRICS_AUTH_TOKEN"])
-
         if os.environ.get("METRICS_ALLOW_CIDRS"):
             set_path(
                 ["metrics", "allow_cidrs"],
                 self._parse_comma_list(os.environ["METRICS_ALLOW_CIDRS"]),
             )
-
-        if os.environ.get("METRICS_AUTH_LIMIT"):
-            value = parse_int(os.environ["METRICS_AUTH_LIMIT"], "METRICS_AUTH_LIMIT")
-            if value is not None:
-                set_path(["metrics", "auth_limit"], value)
-
-        if os.environ.get("METRICS_AUTH_WINDOW"):
-            set_path(["metrics", "auth_window"], os.environ["METRICS_AUTH_WINDOW"])
-
-        if os.environ.get("METRICS_AUTH_MAX_ENTRIES"):
-            value = parse_int(
-                os.environ["METRICS_AUTH_MAX_ENTRIES"],
-                "METRICS_AUTH_MAX_ENTRIES",
-            )
-            if value is not None:
-                set_path(["metrics", "auth_max_entries"], value)
 
         if os.environ.get("METRICS_TLS_CERT"):
             set_path(["metrics", "tls_cert"], os.environ["METRICS_TLS_CERT"])

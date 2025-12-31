@@ -1,12 +1,9 @@
-import hmac
 import logging
-import os
 import socket
 import time
 import urllib.error
 import urllib.request
 
-from django.conf import settings
 from django.db.models import Count
 from django.http import HttpResponse, JsonResponse, StreamingHttpResponse
 from django.views.decorators.http import require_GET
@@ -20,32 +17,18 @@ from .tui_auth import (
 )
 
 AUTH_HEADER = "Authorization"
-TOKEN_HEADER = "X-Reproq-Token"
 logger = logging.getLogger(__name__)
-
-
-def _get_stats_token():
-    token = getattr(settings, "METRICS_AUTH_TOKEN", "") or os.environ.get("METRICS_AUTH_TOKEN", "")
-    if token:
-        return token
-    fallback = getattr(settings, "REPROQ_TUI_SECRET", "") or os.environ.get("REPROQ_TUI_SECRET", "")
-    if fallback:
-        return fallback
-    return ""
 
 
 def _token_from_request(request):
     auth = request.headers.get(AUTH_HEADER, "")
     if auth.lower().startswith("bearer "):
         return auth.split(" ", 1)[1].strip()
-    return request.headers.get(TOKEN_HEADER, "")
+    return ""
 
 
 def _authorized(request):
-    token = _get_stats_token()
     candidate = _token_from_request(request)
-    if token and candidate and hmac.compare_digest(candidate, token):
-        return True
     if candidate and verify_tui_token(candidate):
         return True
     return request.user.is_authenticated and request.user.is_staff
@@ -149,11 +132,11 @@ def _proxy_target(kind):
     return endpoints.get(kind, "")
 
 
-def _build_proxy_request(target_url):
+def _build_proxy_request(target_url, request):
     headers = {}
-    token = _get_stats_token()
-    if token:
-        headers[AUTH_HEADER] = f"Bearer {token}"
+    incoming = request.headers.get(AUTH_HEADER, "")
+    if incoming:
+        headers[AUTH_HEADER] = incoming
     return urllib.request.Request(target_url, headers=headers)
 
 
@@ -162,7 +145,7 @@ def _proxy_response(request, target_url, kind):
     if not target_url:
         _log_proxy_error(kind, request, target_url, "not_configured", status=404, duration_ms=0)
         return JsonResponse({"error": f"{kind} not configured"}, status=404)
-    req = _build_proxy_request(target_url)
+    req = _build_proxy_request(target_url, request)
     try:
         resp = urllib.request.urlopen(req, timeout=5)
     except urllib.error.HTTPError as err:
@@ -214,7 +197,7 @@ def _proxy_stream(request, target_url, kind):
     if not target_url:
         _log_proxy_error(kind, request, target_url, "not_configured", status=404, duration_ms=0)
         return JsonResponse({"error": f"{kind} not configured"}, status=404)
-    req = _build_proxy_request(target_url)
+    req = _build_proxy_request(target_url, request)
     try:
         timeout = 30 if kind == "events" else 5
         resp = urllib.request.urlopen(req, timeout=timeout)
