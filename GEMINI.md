@@ -18,6 +18,29 @@ The binary location is resolved in this order:
 3.  `reproq_django/bin/reproq` (Packaged fallback)
 4.  System `PATH`
 
+## Periodic Tasks
+Schedules live in the `PeriodicTask` model and are executed by `python manage.py reproq beat`.
+Run exactly one beat process per database.
+
+Example:
+```python
+from django.utils import timezone
+from reproq_django.models import PeriodicTask
+
+PeriodicTask.objects.update_or_create(
+    name="Nightly cleanup",
+    defaults={
+        "cron_expr": "0 2 * * *",
+        "task_path": "myapp.tasks.nightly_cleanup",
+        "queue_name": "maintenance",
+        "next_run_at": timezone.now(),
+        "enabled": True,
+    },
+)
+```
+
+To trigger immediately, set `next_run_at = timezone.now()` or call `enqueue()` on the task directly.
+
 ## Developer Note
 When modifying the Django models or backend logic, ensure compatibility with the Go worker's claiming SQL (found in `reproq-worker/internal/queue/queue.go`).
 

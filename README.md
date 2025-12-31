@@ -64,21 +64,33 @@ TASKS = {
 }
 ```
 
-### 3. Bootstrap (Recommended)
+### 3. Define a Task
+Use the Django 6.0 Tasks API with a `@task` decorator:
+
+```python
+from django.tasks import task
+
+@task(queue_name="default", priority=0)
+def send_welcome_email(user_id: int) -> str:
+    # business logic here
+    return f"Email sent to {user_id}"
+```
+
+### 4. Bootstrap (Recommended)
 Bootstrap writes a config file, installs the worker binary, and runs both migration steps:
 ```bash
 python manage.py reproq init
 ```
 Use `--format toml`, `--skip-install`, `--skip-migrate`, or `--skip-worker-migrate` if you need a lighter touch.
 
-### 4. Install the Worker (Standalone)
+### 5. Install the Worker (Standalone)
 If you want only the worker binary:
 ```bash
 python manage.py reproq install
 ```
 *This command detects your OS/Architecture and fetches the correct pre-built binary from GitHub. No Go installation required!*
 
-### 5. Run Migrations
+### 6. Run Migrations
 ```bash
 python manage.py reproq migrate-worker
 python manage.py migrate
@@ -86,9 +98,15 @@ python manage.py migrate
 *Note: `migrate-worker` applies necessary Postgres optimizations (indexes, extensions) that Django migrations cannot handle.*
 It also backfills `task_path` in batches and ensures the `task_runs_task_path_not_empty` check exists; new installs validate it immediately, while older installs can validate it later if desired.
 
-### 5. Start the Worker
+### 7. Start the Worker
 ```bash
 python manage.py reproq worker
+```
+
+### 8. (Optional) Start Beat for Periodic Tasks
+Run exactly one beat process per database if you use periodic tasks:
+```bash
+python manage.py reproq beat
 ```
 
 ---
@@ -190,6 +208,88 @@ for i in range(1000):
 
 backend.bulk_enqueue(jobs)
 ```
+
+---
+
+## ⏰ Periodic Tasks
+
+Reproq stores schedules in the `PeriodicTask` model. The scheduler is the
+`python manage.py reproq beat` process. Run exactly one beat per database.
+
+### Create a Schedule (Admin or ORM)
+You can manage schedules in the Django Admin under "Reproq Django" or via code.
+
+```python
+from django.utils import timezone
+from reproq_django.models import PeriodicTask
+
+PeriodicTask.objects.update_or_create(
+    name="Nightly cleanup",
+    defaults={
+        "cron_expr": "0 2 * * *",
+        "task_path": "myapp.tasks.nightly_cleanup",
+        "queue_name": "maintenance",
+        "next_run_at": timezone.now(),
+        "enabled": True,
+    },
+)
+```
+
+### Seed Schedules in Code (post_migrate)
+This pattern keeps schedules in sync across environments without migrations.
+
+```python
+from django.apps import AppConfig
+from django.db import connections
+from django.db.models.signals import post_migrate
+from django.utils import timezone
+from reproq_django.models import PeriodicTask
+
+def _setup_periodic_tasks(**kwargs):
+    using = kwargs.get("using")
+    connection = connections[using]
+    if "periodic_tasks" not in connection.introspection.table_names():
+        return
+
+    PeriodicTask.objects.update_or_create(
+        name="Nightly cleanup",
+        defaults={
+            "cron_expr": "0 2 * * *",
+            "task_path": "myapp.tasks.nightly_cleanup",
+            "queue_name": "maintenance",
+            "next_run_at": timezone.now(),
+            "enabled": True,
+        },
+    )
+
+class MyAppConfig(AppConfig):
+    name = "myapp"
+
+    def ready(self) -> None:
+        post_migrate.connect(_setup_periodic_tasks, sender=self)
+```
+
+### Run Now (Ad Hoc)
+Use the ORM to force a schedule to run, or enqueue the task directly.
+
+```python
+from django.utils import timezone
+from reproq_django.models import PeriodicTask
+from myapp.tasks import nightly_cleanup
+
+PeriodicTask.objects.filter(name="Nightly cleanup").update(
+    next_run_at=timezone.now()
+)
+
+# Or bypass the schedule
+nightly_cleanup.enqueue()
+```
+
+### Notes
+- `cron_expr` uses standard 5-field cron syntax: `min hour day month weekday`.
+- `task_path` must be the full Python import path for the task.
+- `queue_name` is optional; when set, the worker must listen on that queue.
+- Ensure the task module is allowlisted when `ALLOWED_TASK_MODULES` is used.
 
 ---
 
@@ -364,6 +464,25 @@ The `python manage.py reproq` command is your Swiss Army knife.
 
 ---
 
+## 📊 Stats API (JSON)
+
+When you include `reproq_django.urls` in your project, `GET /stats/` returns
+JSON task counts, per-queue task counts, worker records, and periodic task
+schedules. Access is granted to staff sessions or an API token.
+
+Configure a token via `REPROQ_STATS_TOKEN` (settings or env). For convenience,
+if it is unset, Reproq also accepts `METRICS_AUTH_TOKEN`.
+
+Example:
+
+```bash
+curl -H "Authorization: Bearer $REPROQ_STATS_TOKEN" https://your-app/reproq/stats/
+```
+
+You may also send `X-Reproq-Token: <token>`.
+
+---
+
 ## 🧾 Worker/Beat Config Files
 
 The Go worker/beat support YAML/TOML config files. `manage.py reproq worker` and `manage.py reproq beat`
@@ -397,7 +516,7 @@ Reproq integrates deeply with the Django Admin.
     - **Retry Failed**: Reset failed tasks to READY.
     - **Cancel**: Request cancellation of running/ready tasks.
 - **Workers**: Monitor active worker nodes, their concurrency, and last heartbeat.
-- **Periodic Tasks**: Create and manage cron schedules via the UI.
+- **Periodic Tasks**: Create, enable/disable, and edit cron schedules. Set `next_run_at` to run a job immediately.
 - **Status Note**: Non-standard statuses like `WAITING` or `CANCELLED` map to `PENDING`/`CANCELLED` when supported by Django's `TaskResultStatus`. The original value is always available via `raw_status`.
 
 ---

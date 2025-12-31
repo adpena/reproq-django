@@ -17,7 +17,12 @@ Reproq follows a "split-brain" architecture to maximize both developer productiv
    - Executes tasks by invoking `python -m reproq_django.executor`.
    - Handles heartbeats to ensure the system knows it's alive and can recover from crashes.
 
-3. **PostgreSQL (The Broker)**
+3. **Reproq Beat (The Scheduler)**
+   - A lightweight Python process that scans `periodic_tasks`.
+   - Enqueues due schedules into `task_runs`.
+   - Only one beat process should run per database.
+
+4. **PostgreSQL (The Broker)**
    - Reproq is "Postgres-native."
    - The database is the single source of truth for task state, worker health, and periodic schedules.
 
@@ -28,3 +33,22 @@ Reproq follows a "split-brain" architecture to maximize both developer productiv
 3. **Execute**: The Go worker starts a Python sub-process. It passes the task payload via `stdin` as JSON.
 4. **Heartbeat**: While the Python process is running, the Go worker periodically updates the task's lease in the database.
 5. **Finalize**: Once the Python process finishes, it outputs the result (or traceback) to `stdout`. The Go worker captures this and updates the database state to `SUCCESSFUL` or `FAILED`.
+
+## Periodic Scheduling Flow
+1. **Schedule**: A `PeriodicTask` row defines `cron_expr`, `task_path`, and optional `queue_name`.
+2. **Scan**: The `reproq beat` process scans for schedules due to run.
+3. **Enqueue**: Beat inserts a corresponding `task_runs` row in `READY` state.
+
+## Data Flow Diagram
+```
+Producer code      PeriodicTask
+    |                  |
+    v                  v
+  task_runs  <----  reproq beat
+    |
+    v
+reproq worker ---> python -m reproq_django.executor
+    |
+    v
+  task_runs (SUCCESSFUL/FAILED)
+```

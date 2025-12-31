@@ -31,9 +31,20 @@ If your task needs to return a large amount of data, consider:
 
 If you set `REPROQ_LOGS_DIR` (or `--logs-dir`), the worker persists `stdout`/`stderr` to disk and stores the path in `task_runs.logs_uri`.
 
+Example:
+```python
+from django.tasks import task
+
+@task
+def export_report(report_id):
+    report_url = upload_report(report_id)
+    return {"report_url": report_url}
+```
+
 ## 3. Serialization
 
 Reproq computes `spec_hash` using canonical JSON with Django's JSON encoder. It sorts keys to enforce determinism while safely encoding types like `Decimal` and `UUID` as strings. Prefer simple JSON-serializable inputs whenever possible.
+Datetime values are encoded to ISO 8601 strings by Django's JSON encoder.
 
 ## 4. Executor Settings Resolution
 
@@ -91,7 +102,8 @@ Example payload:
   "lock_key": null,
   "run_after": null,
   "exec": {"timeout_seconds": 900, "max_attempts": 3},
-  "provenance": {"code_ref": "v1.2.3", "pip_lock_hash": "sha256:..."}
+  "provenance": {"code_ref": "v1.2.3", "pip_lock_hash": "sha256:..."},
+  "django": {"settings_module": "myproject.settings"}
 }
 ```
 

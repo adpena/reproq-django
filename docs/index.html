@@ -79,29 +79,48 @@
 
             <section id="quickstart" class="mb-16 prose prose-slate max-w-none">
                 <h2 class="text-3xl font-bold mb-6">Quickstart</h2>
-                <p>Install the package and bootstrap the environment in three steps.</p>
+                <p>Install the package and bootstrap the environment in a few steps.</p>
                 
                 <h4 class="font-bold mt-4">1. Install</h4>
                 <pre>uv pip install reproq-django
 # or: pip install reproq-django</pre>
 
-                <h4 class="font-bold mt-4">2. Bootstrap</h4>
-                <p>Run the interactive init command to download the Go worker and check your settings.</p>
-                <pre>python manage.py reproq init</pre>
-
-                <h4 class="font-bold mt-4">3. Configure</h4>
+                <h4 class="font-bold mt-4">2. Configure</h4>
                 <p>Add to <code>INSTALLED_APPS</code> and set your <code>TASKS</code> backend.</p>
-                <pre>TASKS = {
+                <pre>INSTALLED_APPS = [
+    ...,
+    "reproq_django",
+]
+
+TASKS = {
     "default": {
         "BACKEND": "reproq_django.backend.ReproqBackend",
     }
 }</pre>
+
+                <h4 class="font-bold mt-4">3. Define a Task</h4>
+                <pre>from django.tasks import task
+
+@task(queue_name="default", priority=0)
+def send_welcome_email(user_id):
+    return f"Email sent to {user_id}"</pre>
                 <p class="mt-3 text-sm text-slate-600">In async (ASGI) contexts, use <code>aenqueue()</code> to avoid blocking.</p>
 
-                <h4 class="font-bold mt-4">4. Migrate</h4>
+                <h4 class="font-bold mt-4">4. Bootstrap</h4>
+                <p>Run the init command to download the Go worker and write a config file.</p>
+                <pre>python manage.py reproq init</pre>
+
+                <h4 class="font-bold mt-4">5. Migrate</h4>
                 <p>Run worker schema setup before Django migrations.</p>
                 <pre>python manage.py reproq migrate-worker
 python manage.py migrate --noinput</pre>
+
+                <h4 class="font-bold mt-4">6. Run the Worker</h4>
+                <pre>python manage.py reproq worker</pre>
+
+                <h4 class="font-bold mt-4">7. (Optional) Run Beat</h4>
+                <p>Run exactly one beat process per database if you use periodic tasks.</p>
+                <pre>python manage.py reproq beat</pre>
             </section>
 
             <section id="management" class="mb-16 prose prose-slate max-w-none">
@@ -109,10 +128,14 @@ python manage.py migrate --noinput</pre>
                 <p>Run <code>python manage.py reproq &lt;subcommand&gt;</code> for worker lifecycle and ops.</p>
                 <ul>
                     <li><strong>init</strong>: Write <code>reproq.yaml</code>/<code>reproq.toml</code>, install the worker, and run migrations.</li>
+                    <li><strong>worker</strong>: Start the Go worker process.</li>
+                    <li><strong>beat</strong>: Start the periodic task scheduler (one per database).</li>
+                    <li><strong>migrate-worker</strong>: Apply worker indexes and schema helpers.</li>
                     <li><strong>doctor</strong>: Validate DSN, schema, worker binary, and allowlist health.</li>
                     <li><strong>config --explain</strong>: Print the effective config with precedence.</li>
                     <li><strong>upgrade</strong>: Fetch the latest worker release and run <code>migrate-worker</code>.</li>
                     <li><strong>allowlist --write</strong>: Persist discovered task modules into the config file.</li>
+                    <li><strong>reclaim</strong>: Requeue or fail tasks with expired leases.</li>
                     <li><strong>status / logs / cancel</strong>: Quick ops helpers for triage.</li>
                 </ul>
                 <p class="text-sm text-slate-600">Precedence: defaults &lt; config file &lt; env vars &lt; CLI flags. <code>--dsn</code> overrides <code>DATABASE_URL</code>.</p>
@@ -124,6 +147,7 @@ python manage.py migrate --noinput</pre>
                 <ul>
                     <li><strong>Reproq Django (The Brain)</strong>: Responsible for task definition, enqueuing, and the monitoring UI.</li>
                     <li><strong>Reproq Worker (The Muscle)</strong>: A standalone Go binary that polls PostgreSQL and executes tasks in isolated processes.</li>
+                    <li><strong>Beat (The Scheduler)</strong>: A lightweight process that reads <code>PeriodicTask</code> rows and enqueues due work.</li>
                     <li><strong>PostgreSQL (The Broker)</strong>: The single source of truth for task state and worker health.</li>
                 </ul>
             </section>
@@ -173,6 +197,7 @@ chain(task_a, task_b, task_c).enqueue()</pre>
         "OPTIONS": { "DEDUP_ACTIVE": True }
     }
 }</pre>
+                <p class="text-sm text-slate-600">The spec hash includes scheduling metadata such as <code>priority</code>, <code>run_after</code>, and <code>lock_key</code>, so changes to those fields intentionally bypass deduplication.</p>
                 <p>To force a unique run, include a unique identifier in the task arguments.</p>
                 <pre>import uuid
 
@@ -191,12 +216,33 @@ def send_welcome_email(user_id, **_kwargs):
                     <li><strong>IDs over Objects</strong>: Pass <code>user_id</code> and fetch the user in the task.</li>
                     <li><strong>1MB Output Limit</strong>: The Go worker captures up to 1MB of stdout from the task result. For larger results, use a database model or external storage.</li>
                     <li><strong>Payload Mode</strong>: The worker uses stdin by default. Inline payload mode exposes args in process listings and is disabled in production builds.</li>
+                    <li><strong>Logs Persistence</strong>: Set <code>REPROQ_LOGS_DIR</code> to store stdout/stderr and surface paths via <code>task_runs.logs_uri</code>.</li>
                 </ul>
+                <p class="text-sm text-slate-600">The executor resolves Django settings from <code>spec.django.settings_module</code> or <code>DJANGO_SETTINGS_MODULE</code> and encodes payloads with deterministic JSON for stable spec hashing.</p>
             </section>
 
             <section id="periodic" class="mb-16 prose prose-slate max-w-none">
                 <h2 class="text-3xl font-bold mb-6">Periodic Tasks</h2>
                 <p>Manage cron schedules directly from the Django Admin or using the <code>PeriodicTask</code> model. Ensure the <code>reproq beat</code> process is running to trigger them.</p>
+                <pre>from django.utils import timezone
+from reproq_django.models import PeriodicTask
+
+PeriodicTask.objects.update_or_create(
+    name="Nightly cleanup",
+    defaults={
+        "cron_expr": "0 2 * * *",
+        "task_path": "myapp.tasks.nightly_cleanup",
+        "queue_name": "maintenance",
+        "next_run_at": timezone.now(),
+        "enabled": True,
+    },
+)</pre>
+                <p class="text-sm text-slate-600">To run a schedule immediately, set <code>next_run_at</code> to <code>timezone.now()</code> or call the task's <code>enqueue()</code> method directly.</p>
+                <ul>
+                    <li><strong>cron_expr</strong>: standard 5-field cron syntax (min hour day month weekday).</li>
+                    <li><strong>task_path</strong>: full Python import path for the task.</li>
+                    <li><strong>queue_name</strong>: optional queue routing.</li>
+                </ul>
             </section>
 
             <section id="rate-limits" class="mb-16 prose prose-slate max-w-none">

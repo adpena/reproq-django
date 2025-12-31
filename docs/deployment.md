@@ -109,6 +109,30 @@ Queue selection uses `--queues` (comma-separated). The legacy `--queue` flag rem
 
 **CRITICAL**: Only run **one instance** of the `beat` process per database. Running multiple instances will result in tasks being scheduled multiple times.
 
+Start beat as a dedicated process (recommended):
+```bash
+python manage.py reproq beat --interval 30s
+```
+
+Create schedules in Django Admin or via the ORM:
+```python
+from django.utils import timezone
+from reproq_django.models import PeriodicTask
+
+PeriodicTask.objects.update_or_create(
+    name="Nightly cleanup",
+    defaults={
+        "cron_expr": "0 2 * * *",
+        "task_path": "myapp.tasks.nightly_cleanup",
+        "queue_name": "maintenance",
+        "next_run_at": timezone.now(),
+        "enabled": True,
+    },
+)
+```
+
+To run a schedule immediately, set `next_run_at` to `timezone.now()` or call the task's `enqueue()` method directly.
+
 ## 4a. Reclaiming Orphaned Tasks
 
 If a worker dies while holding a lease, tasks can remain stuck in `RUNNING`.
