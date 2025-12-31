@@ -28,16 +28,20 @@ prestart_interval="${REPROQ_PRESTART_INTERVAL_SECONDS:-5}"
 prestart_max_wait="${REPROQ_PRESTART_MAX_WAIT_SECONDS:-120}"
 worker_cmd="${REPROQ_WORKER_CMD:-uv run python manage.py reproq worker --concurrency ${REPROQ_CONCURRENCY:-3} --metrics-addr ${METRICS_ADDR:-127.0.0.1:9090}}"
 if [[ -v REPROQ_BEAT_CMD ]]; then
-  beat_cmd="$REPROQ_BEAT_CMD"
+  beat_cmd="${REPROQ_BEAT_CMD}"
+  beat_cmd_normalized="$(printf '%s' "$beat_cmd" | tr '[:upper:]' '[:lower:]' | xargs)"
+  case "$beat_cmd_normalized" in
+    ""|"0"|"false"|"off"|"disabled"|"none")
+      beat_cmd=""
+      ;;
+  esac
 else
   beat_cmd="uv run python manage.py reproq beat --interval ${REPROQ_BEAT_INTERVAL:-30s}"
 fi
 web_cmd="${REPROQ_WEB_CMD:-}"
 
 if [[ "${LOW_MEMORY_MODE:-0}" == "1" ]]; then
-  if [[ -n "${beat_cmd}" ]]; then
-    log "LOW_MEMORY_MODE enabled; disabling reproq-beat (use pg_cron for schedules)."
-  fi
+  log "LOW_MEMORY_MODE enabled; disabling reproq-beat (use pg_cron for schedules)."
   beat_cmd=""
 fi
 
