@@ -309,6 +309,17 @@ class Command(BaseCommand):
     def run_check(self):
         self.stdout.write("Checking Reproq configuration...")
         failed = False
+        low_memory = os.getenv("LOW_MEMORY_MODE", "").strip().lower() in {
+            "1",
+            "true",
+            "t",
+            "yes",
+            "y",
+            "on",
+        }
+        beat_cmd_env = os.getenv("REPROQ_BEAT_CMD", "")
+        beat_cmd_normalized = beat_cmd_env.strip().lower()
+        beat_disabled = beat_cmd_normalized in {"", "0", "false", "off", "disabled", "none"}
         worker_bin, resolved_bin, exists = self._resolve_worker_bin()
         self.stdout.write(f"Resolved worker binary: {resolved_bin or worker_bin}")
         try:
@@ -339,6 +350,49 @@ class Command(BaseCommand):
             else:
                 self.stderr.write(self.style.ERROR("❌ Database schema missing (run migrate)."))
                 failed = True
+
+            if low_memory:
+                self.stdout.write(
+                    self.style.WARNING(
+                        "LOW_MEMORY_MODE enabled; reproq-beat is disabled."
+                    )
+                )
+                if connection.vendor != "postgresql":
+                    self.stdout.write(
+                        self.style.WARNING(
+                            "Periodic schedules require pg_cron; unavailable on this database."
+                        )
+                    )
+                elif self._pg_cron_available(cursor):
+                    self.stdout.write(
+                        self.style.WARNING(
+                            "Periodic schedules rely on pg_cron in low-memory mode."
+                        )
+                    )
+                else:
+                    self.stdout.write(
+                        self.style.WARNING(
+                            "Periodic schedules disabled: pg_cron extension not available."
+                        )
+                    )
+            elif beat_disabled:
+                self.stdout.write(
+                    self.style.WARNING(
+                        "reproq-beat disabled via REPROQ_BEAT_CMD; periodic schedules require pg_cron."
+                    )
+                )
+                if connection.vendor != "postgresql":
+                    self.stdout.write(
+                        self.style.WARNING(
+                            "pg_cron unavailable on this database; periodic schedules will not run."
+                        )
+                    )
+                elif not self._pg_cron_available(cursor):
+                    self.stdout.write(
+                        self.style.WARNING(
+                            "pg_cron extension not available; periodic schedules will not run."
+                        )
+                    )
         
         if failed:
             raise CommandError("Reproq check failed.")
