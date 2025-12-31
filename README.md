@@ -503,6 +503,9 @@ Set `LOW_MEMORY_MODE=1` to disable the worker proxy endpoints
 endpoints return a 503 with a short hint while low-memory mode is enabled, and
 events are omitted from the TUI config payload.
 
+Set `REPROQ_MEMORY_LOG_INTERVAL=60s` to emit periodic memory logs from the
+Django process (includes RSS on Linux).
+
 Pass the TUI JWT in the `Authorization: Bearer ...` header when accessing
 these endpoints programmatically.
 
@@ -566,6 +569,7 @@ The Go worker relies on standard environment variables:
 - `REPROQ_CONFIG`: (Optional) Path to a YAML/TOML worker/beat config file.
 - `ALLOWED_TASK_MODULES`: (Optional) Comma-separated task module allow-list for the worker. If unset, `manage.py reproq worker` auto-configures it from discovered task modules.
 - `REPROQ_LOGS_DIR`: (Optional) Directory to persist worker stdout/stderr logs (updates `task_runs.logs_uri`).
+- `REPROQ_MEMORY_LOG_INTERVAL`: (Optional) Log memory stats at the given interval (e.g., `60s`).
 - `METRICS_AUTH_TOKEN`: (Optional) Bearer token for `/metrics`, `/healthz`, and `/events`.
 - `METRICS_ALLOW_CIDRS`: (Optional) Comma-separated IP/CIDR allow-list for metrics/health.
 - `METRICS_TLS_CERT`: (Optional) TLS certificate path for health/metrics.

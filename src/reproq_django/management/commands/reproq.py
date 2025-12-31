@@ -554,9 +554,11 @@ class Command(BaseCommand):
 
         system = platform.system().lower()
         arch = platform.machine().lower()
-        if arch == "x86_64": arch = "amd64"
-        if arch == "arm64" or arch == "aarch64": arch = "arm64"
-        
+        if arch == "x86_64":
+            arch = "amd64"
+        if arch == "arm64" or arch == "aarch64":
+            arch = "arm64"
+
         ext = ".exe" if system == "windows" else ""
         bin_name = f"reproq-{system}-{arch}{ext}"
         if override_path:
@@ -623,7 +625,8 @@ class Command(BaseCommand):
             self.stderr.write(self.style.ERROR("Failed to install worker."))
             sys.exit(1)
 
-        if system != "windows": os.chmod(tmp_path, 0o755)
+        if system != "windows":
+            os.chmod(tmp_path, 0o755)
         try:
             subprocess.check_output([tmp_path, "--version"])
             shutil.move(tmp_path, target_path)
@@ -705,7 +708,8 @@ RestartSec=5
 WantedBy=multi-user.target
 """
             service_name = f"reproq-{name}-{project_name}.service"
-            with open(service_name, "w") as f: f.write(content)
+            with open(service_name, "w") as f:
+                f.write(content)
             self.stdout.write(f"Generated {service_name}")
 
     def _parse_duration(self, value: str) -> timedelta:
@@ -1714,11 +1718,13 @@ WantedBy=multi-user.target
 
     def get_dsn(self):
         env_dsn = os.environ.get("DATABASE_URL")
-        if env_dsn: return env_dsn
+        if env_dsn:
+            return env_dsn
         db_conf = settings.DATABASES.get("default", {})
         user = db_conf.get("USER")
         name = db_conf.get("NAME")
-        if not user or not name: return None
+        if not user or not name:
+            return None
         return f"postgres://{user}:{db_conf.get('PASSWORD', '')}@{db_conf.get('HOST', 'localhost')}:{db_conf.get('PORT', '5432')}/{name}"
 
     def _flag_present(self, flag):
