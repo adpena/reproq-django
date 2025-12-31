@@ -59,6 +59,7 @@ class TestReproqBackend(unittest.TestCase):
         self.assertEqual(run.queue_name, "test-queue")
         self.assertEqual(run.priority, 10)
         self.assertEqual(run.spec_json["task_path"], "test_module.my_func")
+        self.assertEqual(run.task_path, "test_module.my_func")
         self.assertEqual(run.spec_json["args"], [1, 2])
         self.assertEqual(run.spec_json["kwargs"], {"debug": True})
 

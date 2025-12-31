@@ -10,7 +10,11 @@ from asgiref.sync import sync_to_async
 
 from .models import TaskRun
 from .proxy import TaskResultProxy
-from .serialization import normalize_json, spec_hash_for
+from .serialization import normalize_and_hash
+
+def _chunked(values: list[str], size: int = 1000):
+    for idx in range(0, len(values), size):
+        yield values[idx : idx + size]
 
 def _normalize_run_after(run_after: Any) -> datetime | None:
     if run_after is None:
@@ -59,8 +63,7 @@ class ReproqBackend(BaseTaskBackend):
             },
         }
 
-        spec_normalized = normalize_json(spec)
-        spec_hash = spec_hash_for(spec_normalized)
+        spec_normalized, spec_hash = normalize_and_hash(spec)
         dedup = self.options.get("DEDUP_ACTIVE", True)
 
         # TTL / Expiry
@@ -76,6 +79,7 @@ class ReproqBackend(BaseTaskBackend):
                 priority=priority,
                 run_after=run_after_dt,
                 spec_json=spec_normalized,
+                task_path=spec_normalized.get("task_path"),
                 spec_hash=spec_hash,
                 status="READY",
                 errors_json=[],
@@ -159,8 +163,7 @@ class ReproqBackend(BaseTaskBackend):
                 },
             }
 
-            spec_normalized = normalize_json(spec)
-            spec_hash = spec_hash_for(spec_normalized)
+            spec_normalized, spec_hash = normalize_and_hash(spec)
             entries.append(
                 {
                     "spec": spec_normalized,
@@ -181,6 +184,7 @@ class ReproqBackend(BaseTaskBackend):
                     priority=entry["priority"],
                     run_after=entry["run_after_dt"],
                     spec_json=entry["spec"],
+                    task_path=entry["spec"].get("task_path"),
                     spec_hash=entry["spec_hash"],
                     status="READY",
                     max_attempts=entry["spec"]["exec"]["max_attempts"],
@@ -190,13 +194,17 @@ class ReproqBackend(BaseTaskBackend):
                 )
                 for entry in entries
             ]
-            created = TaskRun.objects.bulk_create(runs)
+            created = TaskRun.objects.bulk_create(runs, batch_size=1000)
             return [TaskResultProxy(str(run.result_id), self) for run in created]
 
-        existing = TaskRun.objects.filter(
-            spec_hash__in=spec_hashes, status__in=["READY", "RUNNING"]
-        ).values_list("spec_hash", "result_id")
-        result_ids = {spec_hash: result_id for spec_hash, result_id in existing}
+        result_ids: dict[str, int] = {}
+        spec_hash_list = list(spec_hashes)
+        for chunk in _chunked(spec_hash_list):
+            existing = TaskRun.objects.filter(
+                spec_hash__in=chunk, status__in=["READY", "RUNNING"]
+            ).values_list("spec_hash", "result_id")
+            for spec_hash, result_id in existing:
+                result_ids[spec_hash] = result_id
 
         runs = []
         seen = set(result_ids.keys())
@@ -211,6 +219,7 @@ class ReproqBackend(BaseTaskBackend):
                     priority=entry["priority"],
                     run_after=entry["run_after_dt"],
                     spec_json=entry["spec"],
+                    task_path=entry["spec"].get("task_path"),
                     spec_hash=spec_hash,
                     status="READY",
                     max_attempts=entry["spec"]["exec"]["max_attempts"],
@@ -222,13 +231,15 @@ class ReproqBackend(BaseTaskBackend):
             seen.add(spec_hash)
 
         if runs:
-            TaskRun.objects.bulk_create(runs, ignore_conflicts=True)
-            created = TaskRun.objects.filter(
-                spec_hash__in=[run.spec_hash for run in runs],
-                status__in=["READY", "RUNNING"],
-            ).values_list("spec_hash", "result_id")
-            for spec_hash, result_id in created:
-                result_ids[spec_hash] = result_id
+            TaskRun.objects.bulk_create(runs, ignore_conflicts=True, batch_size=1000)
+            run_hashes = [run.spec_hash for run in runs]
+            for chunk in _chunked(run_hashes):
+                created = TaskRun.objects.filter(
+                    spec_hash__in=chunk,
+                    status__in=["READY", "RUNNING"],
+                ).values_list("spec_hash", "result_id")
+                for spec_hash, result_id in created:
+                    result_ids[spec_hash] = result_id
 
         results = []
         for entry in entries:
@@ -241,6 +252,7 @@ class ReproqBackend(BaseTaskBackend):
                     priority=entry["priority"],
                     run_after=entry["run_after_dt"],
                     spec_json=entry["spec"],
+                    task_path=entry["spec"].get("task_path"),
                     spec_hash=spec_hash,
                     status="READY",
                     max_attempts=entry["spec"]["exec"]["max_attempts"],

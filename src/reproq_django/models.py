@@ -18,6 +18,7 @@ class TaskRun(models.Model):
 
     spec_json = models.JSONField()
     spec_hash = models.CharField(max_length=64)
+    task_path = models.TextField(null=True, blank=True)
 
     status = models.TextField(default=TaskRunStatus.READY)
     enqueued_at = models.DateTimeField(auto_now_add=True)

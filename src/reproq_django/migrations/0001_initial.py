@@ -4,11 +4,68 @@ import django.db.models.deletion
 from django.db import migrations, models
 
 
+def ensure_task_path_guard(apps, schema_editor):
+    if schema_editor.connection.vendor != "postgresql":
+        return
+
+    with schema_editor.connection.cursor() as cursor:
+        cursor.execute(
+            """
+            CREATE OR REPLACE FUNCTION reproq_task_path_from_spec()
+            RETURNS trigger AS $$
+            BEGIN
+                IF NEW.task_path IS NULL OR NEW.task_path = '' THEN
+                    NEW.task_path := NEW.spec_json->>'task_path';
+                END IF;
+                RETURN NEW;
+            END;
+            $$ LANGUAGE plpgsql;
+            """
+        )
+        cursor.execute("DROP TRIGGER IF EXISTS trg_task_runs_task_path ON task_runs;")
+        cursor.execute(
+            """
+            CREATE TRIGGER trg_task_runs_task_path
+            BEFORE INSERT OR UPDATE OF spec_json, task_path ON task_runs
+            FOR EACH ROW
+            EXECUTE FUNCTION reproq_task_path_from_spec();
+            """
+        )
+        cursor.execute(
+            """
+            DO $$
+            BEGIN
+                IF NOT EXISTS (
+                    SELECT 1 FROM pg_constraint WHERE conname = 'task_runs_task_path_not_empty'
+                ) THEN
+                    ALTER TABLE task_runs
+                    ADD CONSTRAINT task_runs_task_path_not_empty CHECK (task_path IS NOT NULL AND task_path <> '') NOT VALID;
+                END IF;
+            END $$;
+            """
+        )
+        cursor.execute(
+            """
+            CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_task_runs_task_path
+            ON task_runs (task_path);
+            """
+        )
+        cursor.execute(
+            """
+            CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_task_runs_claim_due
+            ON task_runs (queue_name, COALESCE(run_after, '-infinity'::timestamptz), priority DESC, enqueued_at ASC)
+            WHERE status = 'READY';
+            """
+        )
+
+
 class Migration(migrations.Migration):
 
     initial = True
 
     dependencies = []
+
+    atomic = False
 
     operations = [
         migrations.CreateModel(
@@ -60,6 +117,7 @@ class Migration(migrations.Migration):
                 ("run_after", models.DateTimeField(blank=True, null=True)),
                 ("spec_json", models.JSONField()),
                 ("spec_hash", models.CharField(max_length=64)),
+                ("task_path", models.TextField(blank=True, null=True)),
                 ("status", models.TextField(default="READY")),
                 ("enqueued_at", models.DateTimeField(auto_now_add=True)),
                 ("started_at", models.DateTimeField(blank=True, null=True)),
@@ -74,6 +132,8 @@ class Migration(migrations.Migration):
                 ("worker_ids", models.JSONField(blank=True, default=list)),
                 ("return_json", models.JSONField(blank=True, null=True)),
                 ("errors_json", models.JSONField(blank=True, default=list)),
+                ("last_error", models.TextField(blank=True, null=True)),
+                ("failed_at", models.DateTimeField(blank=True, null=True)),
                 ("leased_until", models.DateTimeField(blank=True, null=True)),
                 ("leased_by", models.TextField(blank=True, null=True)),
                 ("logs_uri", models.TextField(blank=True, null=True)),
@@ -100,4 +160,5 @@ class Migration(migrations.Migration):
                 "permissions": [("can_replay_taskrun", "Can replay task run")],
             },
         ),
+        migrations.RunPython(ensure_task_path_guard, migrations.RunPython.noop),
     ]

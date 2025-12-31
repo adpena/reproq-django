@@ -91,7 +91,15 @@ class TaskRunAdmin(admin.ModelAdmin):
         "enqueued_at", "duration", "attempts_display", "workflow_info"
     )
     list_filter = ("status", LeaseStatusFilter, "queue_name", "backend_alias")
-    search_fields = ("result_id", "spec_hash", "leased_by", "lock_key", "workflow_id")
+    search_fields = ("result_id", "spec_hash", "task_path", "leased_by", "lock_key", "workflow_id")
+
+    def get_queryset(self, request):
+        return super().get_queryset(request).defer(
+            "spec_json",
+            "errors_json",
+            "return_json",
+            "worker_ids",
+        )
     
     def workflow_info(self, obj):
         if not obj.workflow_id:
@@ -213,12 +221,14 @@ class TaskRunAdmin(admin.ModelAdmin):
     def replay_tasks(self, request, queryset):
         count = 0
         for old_run in queryset:
+            task_path = old_run.task_path or (old_run.spec_json or {}).get("task_path")
             TaskRun.objects.create(
                 backend_alias=old_run.backend_alias,
                 queue_name=old_run.queue_name,
                 priority=old_run.priority,
                 run_after=None,
                 spec_json=old_run.spec_json,
+                task_path=task_path,
                 spec_hash=old_run.spec_hash,
                 status="READY",
                 errors_json=[],
@@ -295,6 +305,7 @@ class TaskRunAdmin(admin.ModelAdmin):
             priority=spec["priority"],
             run_after=None,
             spec_json=spec,
+            task_path=spec["task_path"],
             spec_hash=spec_hash,
             status="RUNNING",
             errors_json=[],

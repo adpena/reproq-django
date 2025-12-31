@@ -161,6 +161,7 @@ post-start enqueue guarded by a deploy identifier (for example,
 **Schema mismatch or missing columns**
 - Run `python manage.py reproq migrate-worker` and re-check `python manage.py reproq doctor`.
 - If you used legacy array-based worker migrations, apply the JSONB conversion migration from the reproq-worker repo.
+ - To validate the task_path guard after backfill: `ALTER TABLE task_runs VALIDATE CONSTRAINT task_runs_task_path_not_empty;`
 
 **DSN or config precedence confusion**
 - Use `python manage.py reproq config --explain` to see the winning values.

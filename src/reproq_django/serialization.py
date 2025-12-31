@@ -18,6 +18,10 @@ def canonical_json(obj: Any) -> str:
 def normalize_json(obj: Any) -> Any:
     return json.loads(canonical_json(obj))
 
+def normalize_and_hash(obj: Any) -> tuple[Any, str]:
+    canonical = canonical_json(obj)
+    return json.loads(canonical), hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
 
 def spec_hash_for(spec: Any) -> str:
     return hashlib.sha256(canonical_json(spec).encode("utf-8")).hexdigest()
