@@ -120,6 +120,9 @@ If `pg_cron` is not available, the command will fail. Verify support with:
 ```sql
 SELECT * FROM pg_available_extensions WHERE name = 'pg_cron';
 ```
+If you run with `--if-supported` and see `pg-cron extension not available; skipping.`,
+periodic tasks will not run unless you enable beat or upgrade to a database
+that provides pg_cron.
 
 ### Seeding Periodic Tasks
 You can create schedules in Django Admin or seed them in code using `PeriodicTask`:
