@@ -52,7 +52,8 @@ startCommand: >
 
 Optional overrides:
 - `REPROQ_WORKER_CMD`: Full worker command (string).
-- `REPROQ_BEAT_CMD`: Full beat command (string); set empty to disable beat.
+- `REPROQ_BEAT_CMD`: Full beat command (string). Leave unset to use the default;
+  set it to an empty string to disable beat.
 - `REPROQ_RESTART_DELAY_SECONDS`: Restart delay (default 5).
 
 This is less isolated than dedicated worker services, but it avoids extra
@@ -96,7 +97,7 @@ Run exactly one instance of the `beat` process. You can run this as another back
 ```
 
 ### Option B: pg_cron
-If your Postgres supports `pg_cron`, install schedules in-app:
+If your Postgres supports `pg_cron`, install schedules in-app (after migrations):
 
 ```bash
 uv run python manage.py reproq pg-cron --install
@@ -105,6 +106,19 @@ uv run python manage.py reproq pg-cron --install
 To remove schedules:
 ```bash
 uv run python manage.py reproq pg-cron --remove
+```
+
+Recommended Render pre-deploy hook when using pg_cron:
+```yaml
+preDeployCommand: |
+  uv run python manage.py reproq migrate-worker
+  uv run python manage.py migrate --noinput
+  uv run python manage.py reproq pg-cron --install
+```
+
+If `pg_cron` is not available, the command will fail. Verify support with:
+```sql
+SELECT * FROM pg_available_extensions WHERE name = 'pg_cron';
 ```
 
 ### Seeding Periodic Tasks
@@ -139,3 +153,9 @@ Ensure the following variables are set in your Render environment:
 
 ## 5. Memory Considerations
 Reproq Worker is extremely light. It typically uses less than 20MB of RAM, making it perfect for Render's **Free Tier** or **Starter** plans.
+
+For Python/Django memory tuning on small instances:
+- Keep `WEB_CONCURRENCY=1` and `REPROQ_CONCURRENCY=1` to avoid over-committing RAM.
+- Use `--max-requests` + jitter to recycle Gunicorn workers (limits fragmentation over long uptimes).
+- Avoid `--preload` unless you have headroom; preload can spike RSS on small plans.
+- Enable `LOW_MEMORY_MODE=1` to disable metrics/events/health endpoints when needed.

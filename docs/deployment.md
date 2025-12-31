@@ -125,6 +125,14 @@ Remove schedules with:
 python manage.py reproq pg-cron --remove
 ```
 
+Run `reproq pg-cron --install` after every deploy or migration so the cron
+jobs stay in sync with the `PeriodicTask` table.
+
+Verify the extension is available:
+```sql
+SELECT * FROM pg_available_extensions WHERE name = 'pg_cron';
+```
+
 Create schedules in Django Admin or via the ORM:
 ```python
 from django.utils import timezone
@@ -143,6 +151,9 @@ PeriodicTask.objects.update_or_create(
 ```
 
 To run a schedule immediately, set `next_run_at` to `timezone.now()` or call the task's `enqueue()` method directly.
+
+For a "just works" setup, seed schedules in code via `post_migrate` and let
+beat/pg_cron pick them up automatically on deploy.
 
 ## 4a. Reclaiming Orphaned Tasks
 

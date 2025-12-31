@@ -221,8 +221,14 @@ backend.bulk_enqueue(jobs)
 
 ## ⏰ Periodic Tasks
 
-Reproq stores schedules in the `PeriodicTask` model. The scheduler is the
-`python manage.py reproq beat` process. Run exactly one beat per database.
+Reproq stores schedules in the `PeriodicTask` model. You must run **exactly one**
+scheduler per database:
+
+- **Beat**: `python manage.py reproq beat`
+- **pg_cron**: `python manage.py reproq pg-cron --install` (Postgres-native)
+
+If you choose pg_cron, run `reproq pg-cron --install` after every deploy or
+migration to keep schedules in sync.
 
 ### Create a Schedule (Admin or ORM)
 You can manage schedules in the Django Admin under "Reproq Django" or via code.
