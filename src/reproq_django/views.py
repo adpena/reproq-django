@@ -12,7 +12,12 @@ from django.http import HttpResponse, JsonResponse, StreamingHttpResponse
 from django.views.decorators.http import require_GET
 
 from .models import TaskRun, Worker, PeriodicTask
-from .tui_auth import get_tui_internal_endpoints, tui_events_enabled, verify_tui_token
+from .tui_auth import (
+    get_tui_internal_endpoints,
+    tui_events_enabled,
+    tui_low_memory_enabled,
+    verify_tui_token,
+)
 
 AUTH_HEADER = "Authorization"
 TOKEN_HEADER = "X-Reproq-Token"
@@ -23,6 +28,9 @@ def _get_stats_token():
     token = getattr(settings, "METRICS_AUTH_TOKEN", "") or os.environ.get("METRICS_AUTH_TOKEN", "")
     if token:
         return token
+    fallback = getattr(settings, "REPROQ_TUI_SECRET", "") or os.environ.get("REPROQ_TUI_SECRET", "")
+    if fallback:
+        return fallback
     return ""
 
 
@@ -79,6 +87,16 @@ def _log_proxy_info(kind, request, target_url, status=None, duration_ms=None):
         target_url,
         _client_ip(request),
         _request_id(request),
+    )
+
+
+def _low_memory_response(kind):
+    return JsonResponse(
+        {
+            "error": f"{kind} disabled (LOW_MEMORY_MODE enabled)",
+            "hint": "Unset LOW_MEMORY_MODE to re-enable metrics/health/events.",
+        },
+        status=503,
     )
 
 
@@ -227,6 +245,8 @@ def _proxy_stream(request, target_url, kind):
 def reproq_tui_metrics_proxy(request):
     if not _authorized(request):
         return JsonResponse({"error": "Unauthorized"}, status=403)
+    if tui_low_memory_enabled():
+        return _low_memory_response("metrics")
     target_url = _proxy_target("metrics")
     return _proxy_response(request, target_url, "metrics")
 
@@ -235,6 +255,8 @@ def reproq_tui_metrics_proxy(request):
 def reproq_tui_health_proxy(request):
     if not _authorized(request):
         return JsonResponse({"error": "Unauthorized"}, status=403)
+    if tui_low_memory_enabled():
+        return _low_memory_response("health")
     target_url = _proxy_target("health")
     return _proxy_response(request, target_url, "health")
 
@@ -243,6 +265,8 @@ def reproq_tui_health_proxy(request):
 def reproq_tui_events_proxy(request):
     if not _authorized(request):
         return JsonResponse({"error": "Unauthorized"}, status=403)
+    if tui_low_memory_enabled():
+        return _low_memory_response("events")
     if not tui_events_enabled():
         return JsonResponse({"error": "events disabled"}, status=404)
     target_url = _proxy_target("events")

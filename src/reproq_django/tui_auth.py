@@ -35,7 +35,13 @@ def _truthy(value):
     return str(value).strip().lower() in {"1", "true", "yes", "on"}
 
 
+def tui_low_memory_enabled():
+    return _truthy(_get_tui_setting("LOW_MEMORY_MODE"))
+
+
 def tui_events_enabled():
+    if tui_low_memory_enabled():
+        return False
     return not _truthy(_get_tui_setting("REPROQ_TUI_DISABLE_EVENTS"))
 
 
@@ -134,15 +140,20 @@ def get_tui_internal_endpoints():
 def build_tui_config_payload(request):
     payload = _public_worker_config()
     if payload:
+        if tui_low_memory_enabled():
+            payload["low_memory_mode"] = True
         return payload
     internal = get_tui_internal_endpoints()
     if not internal:
         return {}
-    return {
+    payload = {
         "worker_metrics_url": request.build_absolute_uri(reverse("reproq-tui-metrics")),
         "worker_health_url": request.build_absolute_uri(reverse("reproq-tui-health")),
         "events_url": request.build_absolute_uri(reverse("reproq-tui-events")),
     }
+    if tui_low_memory_enabled():
+        payload["low_memory_mode"] = True
+    return payload
 
 
 def _b64url(data):

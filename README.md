@@ -479,7 +479,14 @@ If you do not want to expose SSE, set `REPROQ_TUI_DISABLE_EVENTS=1` to omit
 the `/reproq/tui/events/` stream from the TUI config payload.
 
 Configure a token via `METRICS_AUTH_TOKEN` (settings or env). The stats endpoint
-also accepts signed TUI JWTs (when `REPROQ_TUI_SECRET` is set).
+also accepts signed TUI JWTs (when `REPROQ_TUI_SECRET` is set). If
+`METRICS_AUTH_TOKEN` is unset, `REPROQ_TUI_SECRET` is reused as the bearer
+token so a single secret can secure stats + TUI auth.
+
+Set `LOW_MEMORY_MODE=1` to disable the worker proxy endpoints
+(`/reproq/tui/metrics/`, `/reproq/tui/healthz/`, `/reproq/tui/events/`). The
+endpoints return a 503 with a short hint while low-memory mode is enabled, and
+events are omitted from the TUI config payload.
 
 Example:
 
