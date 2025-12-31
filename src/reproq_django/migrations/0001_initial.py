@@ -39,7 +39,7 @@ def ensure_task_path_guard(apps, schema_editor):
                     SELECT 1 FROM pg_constraint WHERE conname = 'task_runs_task_path_not_empty'
                 ) THEN
                     ALTER TABLE task_runs
-                    ADD CONSTRAINT task_runs_task_path_not_empty CHECK (task_path IS NOT NULL AND task_path <> '') NOT VALID;
+                    ADD CONSTRAINT task_runs_task_path_not_empty CHECK (task_path IS NOT NULL AND task_path <> '');
                 END IF;
             END $$;
             """

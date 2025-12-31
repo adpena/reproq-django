@@ -84,7 +84,7 @@ python manage.py reproq migrate-worker
 python manage.py migrate
 ```
 *Note: `migrate-worker` applies necessary Postgres optimizations (indexes, extensions) that Django migrations cannot handle.*
-It also backfills `task_path` in batches and creates the `task_runs_task_path_not_empty` check as `NOT VALID` to avoid long locks; validate it later if desired.
+It also backfills `task_path` in batches and ensures the `task_runs_task_path_not_empty` check exists; new installs validate it immediately, while older installs can validate it later if desired.
 
 ### 5. Start the Worker
 ```bash
