@@ -41,7 +41,9 @@ Example `startCommand`:
 ```yaml
 startCommand: >
   /bin/bash -lc "
-  export REPROQ_PRESTART_CMD='uv run python manage.py reproq check || true';
+  export REPROQ_PRESTART_CMD='uv run python manage.py reproq check';
+  export REPROQ_PRESTART_INTERVAL_SECONDS='5';
+  export REPROQ_PRESTART_MAX_WAIT_SECONDS='120';
   export REPROQ_WEB_CMD='uv run gunicorn myproj.wsgi:application --preload --workers=${WEB_CONCURRENCY:-1}';
   render_start=$(uv run python -c 'import importlib.resources as r; print(r.files("reproq_django.resources").joinpath("render_start.sh"))');
   bash \"$render_start\"

@@ -19,4 +19,6 @@
 ## Conventions
 - Keep schema and SQL compatibility with the Go worker (`reproq-worker/internal/queue/queue.go`).
 - Favor backwards-compatible changes for migrations and task schema.
+- Keep exactly one migration file in `src/reproq_django/migrations/` unless absolutely necessary.
 - Update version strings together (`pyproject.toml` and `src/reproq_django/__init__.py`) when releasing.
+- Retain only three tags/releases at any time; delete older tags/releases and their artifacts.

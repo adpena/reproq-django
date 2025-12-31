@@ -23,7 +23,9 @@ shutdown() {
 trap shutdown SIGTERM SIGINT
 
 restart_delay="${REPROQ_RESTART_DELAY_SECONDS:-5}"
-prestart_cmd="${REPROQ_PRESTART_CMD:-uv run python manage.py reproq check || true}"
+prestart_cmd="${REPROQ_PRESTART_CMD:-uv run python manage.py reproq check}"
+prestart_interval="${REPROQ_PRESTART_INTERVAL_SECONDS:-5}"
+prestart_max_wait="${REPROQ_PRESTART_MAX_WAIT_SECONDS:-120}"
 worker_cmd="${REPROQ_WORKER_CMD:-uv run python manage.py reproq worker --concurrency ${REPROQ_CONCURRENCY:-3} --metrics-addr ${METRICS_ADDR:-127.0.0.1:9090}}"
 beat_cmd="${REPROQ_BEAT_CMD:-uv run python manage.py reproq beat --interval ${REPROQ_BEAT_INTERVAL:-30s}}"
 web_cmd="${REPROQ_WEB_CMD:-}"
@@ -35,7 +37,25 @@ fi
 
 if [[ -n "$prestart_cmd" ]]; then
   log "prestart: ${prestart_cmd}"
-  bash -lc "$prestart_cmd" || true
+  prestart_started=$(date +%s)
+  while true; do
+    if bash -lc "$prestart_cmd"; then
+      log "prestart ok"
+      break
+    fi
+    if [[ "${stop_requested}" -eq 1 ]]; then
+      log "prestart canceled"
+      exit 1
+    fi
+    now=$(date +%s)
+    elapsed=$((now - prestart_started))
+    if [[ "${prestart_max_wait}" -gt 0 && "${elapsed}" -ge "${prestart_max_wait}" ]]; then
+      log "prestart failed after ${elapsed}s"
+      exit 1
+    fi
+    log "prestart failed; retrying in ${prestart_interval}s"
+    sleep "${prestart_interval}"
+  done
 fi
 
 run_with_restart() {

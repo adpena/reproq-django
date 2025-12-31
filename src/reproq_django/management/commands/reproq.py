@@ -274,6 +274,7 @@ class Command(BaseCommand):
 
     def run_check(self):
         self.stdout.write("Checking Reproq configuration...")
+        failed = False
         worker_bin, resolved_bin, exists = self._resolve_worker_bin()
         self.stdout.write(f"Resolved worker binary: {resolved_bin or worker_bin}")
         try:
@@ -283,6 +284,7 @@ class Command(BaseCommand):
             self.stderr.write(self.style.ERROR(f"❌ Worker binary invalid: {e}"))
             if resolved_bin:
                 self.stderr.write(self.style.ERROR(f"   Resolved path: {resolved_bin}"))
+            failed = True
 
         dsn = self.get_dsn()
         if dsn:
@@ -294,6 +296,7 @@ class Command(BaseCommand):
             self.stderr.write(
                 self.style.ERROR("   Set DATABASE_URL or configure DATABASES with USER/NAME.")
             )
+            failed = True
 
         with connection.cursor() as cursor:
             tables = connection.introspection.table_names(cursor)
@@ -301,7 +304,11 @@ class Command(BaseCommand):
                 self.stdout.write(self.style.SUCCESS("✅ Database schema present."))
             else:
                 self.stderr.write(self.style.ERROR("❌ Database schema missing (run migrate)."))
+                failed = True
         
+        if failed:
+            raise CommandError("Reproq check failed.")
+
         self.stdout.write(self.style.SUCCESS("\n✨ Configuration looks good!"))
 
     def run_init(self, options):

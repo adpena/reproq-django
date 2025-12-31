@@ -158,9 +158,12 @@ class TestReproqBackend(unittest.TestCase):
         self.assertGreater(run.expires_at, dj_timezone.now())
 
 class TestReproqManagement(unittest.TestCase):
+    @patch("django.db.connection.introspection.table_names", return_value=["task_runs"])
+    @patch("reproq_django.management.commands.reproq.Command.get_dsn")
     @patch("subprocess.check_output")
-    def test_check_command(self, mock_version):
+    def test_check_command(self, mock_version, mock_get_dsn, _mock_tables):
         mock_version.return_value = b"reproq version v0.1.0"
+        mock_get_dsn.return_value = "postgres://user:pass@localhost:5432/db"
         from django.core.management import call_command
         from io import StringIO
         out = StringIO()
