@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Reproq TUI Login</title>
+    <style>
+      :root { color-scheme: light; }
+      body { font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; background: #f5f7fb; color: #1a2233; margin: 0; }
+      .wrap { min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 32px; }
+      .card { background: #ffffff; border: 1px solid #d0d7e2; border-radius: 12px; padding: 28px; width: 100%; max-width: 420px; box-shadow: 0 10px 30px rgba(15, 23, 42, 0.08); }
+      h1 { margin: 0 0 8px; font-size: 22px; }
+      p { margin: 0 0 20px; color: #475569; }
+      label { display: block; font-weight: 600; font-size: 13px; margin: 12px 0 6px; }
+      input { width: 100%; padding: 10px 12px; border: 1px solid #cbd5e1; border-radius: 8px; font-size: 14px; }
+      button { margin-top: 18px; width: 100%; padding: 10px 12px; border: none; border-radius: 8px; background: #0f766e; color: #fff; font-weight: 600; cursor: pointer; }
+      .error { background: #fee2e2; color: #991b1b; padding: 10px 12px; border-radius: 8px; margin-bottom: 12px; }
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <div class="card">
+        <h1>Reproq TUI Sign In</h1>
+        <p>Sign in as a superuser to approve this TUI session.</p>
+        {% if form.errors %}
+          <div class="error">Invalid username or password.</div>
+        {% endif %}
+        <form method="post" action="{% url 'reproq-tui-login' %}?next={{ next|urlencode }}">
+          {% csrf_token %}
+          <label for="{{ form.username.id_for_label }}">Username</label>
+          {{ form.username }}
+          <label for="{{ form.password.id_for_label }}">Password</label>
+          {{ form.password }}
+          <button type="submit">Sign In</button>
+        </form>
+      </div>
+    </div>
+  </body>
+</html>

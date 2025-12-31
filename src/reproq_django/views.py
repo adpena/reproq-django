@@ -6,16 +6,17 @@ from django.db.models import Count
 from django.http import JsonResponse
 
 from .models import TaskRun, Worker, PeriodicTask
+from .tui_auth import verify_tui_token
 
 AUTH_HEADER = "Authorization"
 TOKEN_HEADER = "X-Reproq-Token"
 
 
 def _get_stats_token():
-    token = getattr(settings, "REPROQ_STATS_TOKEN", "") or os.environ.get("REPROQ_STATS_TOKEN", "")
+    token = getattr(settings, "METRICS_AUTH_TOKEN", "") or os.environ.get("METRICS_AUTH_TOKEN", "")
     if token:
         return token
-    return os.environ.get("METRICS_AUTH_TOKEN", "")
+    return ""
 
 
 def _token_from_request(request):
@@ -27,10 +28,11 @@ def _token_from_request(request):
 
 def _authorized(request):
     token = _get_stats_token()
-    if token:
-        candidate = _token_from_request(request)
-        if candidate and hmac.compare_digest(candidate, token):
-            return True
+    candidate = _token_from_request(request)
+    if token and candidate and hmac.compare_digest(candidate, token):
+        return True
+    if candidate and verify_tui_token(candidate):
+        return True
     return request.user.is_authenticated and request.user.is_staff
 
 def reproq_stats_api(request):
