@@ -26,6 +26,8 @@ def test_spec_hash_contract():
         "queue_name": "default",
         "priority": 5,
         "lock_key": "user:123",
+        "concurrency_key": "account:42",
+        "concurrency_limit": 2,
         "run_after": "2025-01-01T12:00:00+00:00",
         "exec": {"timeout_seconds": 900, "max_attempts": 3},
         "provenance": {"code_ref": "abc123", "pip_lock_hash": "deadbeef"},

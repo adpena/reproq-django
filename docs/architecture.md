@@ -6,7 +6,7 @@ Reproq follows a "split-brain" architecture to maximize both developer productiv
 
 1. **Reproq Django (The Manager)**
    - Responsible for task definition via the standard `@task` decorator.
-   - Manages the PostgreSQL tables (`task_runs`, `periodic_tasks`, `reproq_workers`).
+   - Manages the PostgreSQL tables (`task_runs`, `periodic_tasks`, `reproq_workers`, `reproq_queue_controls`).
    - Provides the enqueuing logic and ensures tasks are written to the database with the correct `spec_hash`.
    - Offers the Django Admin dashboard for monitoring and manual control.
 
@@ -16,6 +16,7 @@ Reproq follows a "split-brain" architecture to maximize both developer productiv
    - Manages a pool of worker goroutines.
    - Executes tasks by invoking `python -m reproq_django.executor`.
    - Handles heartbeats to ensure the system knows it's alive and can recover from crashes.
+   - Respects queue pause controls and concurrency limits when claiming tasks.
 
 3. **Reproq Scheduler (Beat or pg_cron)**
    - Beat: a lightweight Python process that scans `periodic_tasks`.

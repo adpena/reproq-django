@@ -4,10 +4,11 @@ import os
 from datetime import timedelta
 
 from django.core.management.base import BaseCommand, CommandError
-from django.db import connection
+from django.db import connections
 from django.db.models import Count
 from django.utils import timezone
 
+from reproq_django.db import default_db_alias
 from reproq_django.models import PeriodicTask, TaskRun, Worker
 
 
@@ -35,8 +36,10 @@ class Command(BaseCommand):
 
         self.stdout.write(self.style.MIGRATE_HEADING("Reproq health check"))
 
+        db_alias = default_db_alias()
+        conn = connections[db_alias]
         try:
-            connection.ensure_connection()
+            conn.ensure_connection()
         except Exception as exc:
             raise CommandError(f"Database connection failed: {exc}") from exc
 
@@ -45,17 +48,17 @@ class Command(BaseCommand):
         else:
             self.stdout.write(self.style.WARNING("⚠️ DATABASE_URL not set in env."))
 
-        with connection.cursor() as cursor:
-            table_names = set(connection.introspection.table_names(cursor))
+        with conn.cursor() as cursor:
+            table_names = set(conn.introspection.table_names(cursor))
 
-        required_tables = {"task_runs", "reproq_workers", "periodic_tasks"}
+        required_tables = {"task_runs", "reproq_workers", "periodic_tasks", "reproq_queue_controls"}
         missing_tables = required_tables - table_names
         if missing_tables:
             missing_list = ", ".join(sorted(missing_tables))
             raise CommandError(f"Missing tables: {missing_list} (run migrations).")
         self.stdout.write(self.style.SUCCESS("✅ Reproq tables present."))
 
-        task_counts = TaskRun.objects.values("status").annotate(count=Count("result_id"))
+        task_counts = TaskRun.objects.using(db_alias).values("status").annotate(count=Count("result_id"))
         if not task_counts:
             self.stdout.write(self.style.WARNING("⚠️ No task runs found."))
         else:
@@ -64,7 +67,7 @@ class Command(BaseCommand):
                 self.stdout.write(f"  {stat['status']}: {stat['count']}")
 
         self.stdout.write(self.style.MIGRATE_HEADING("\nRecent tasks"))
-        recent_runs = TaskRun.objects.order_by("-enqueued_at")[:recent_limit]
+        recent_runs = TaskRun.objects.using(db_alias).order_by("-enqueued_at")[:recent_limit]
         if not recent_runs:
             self.stdout.write("  (none)")
         else:
@@ -75,7 +78,7 @@ class Command(BaseCommand):
                 )
 
         self.stdout.write(self.style.MIGRATE_HEADING("\nWorkers"))
-        workers = Worker.objects.all()
+        workers = Worker.objects.using(db_alias).all()
         if not workers:
             self.stdout.write(self.style.WARNING("⚠️ No workers registered."))
             self.stdout.write(
@@ -92,7 +95,7 @@ class Command(BaseCommand):
                     f"{status} last_seen={worker.last_seen_at} queues={worker.queues}"
                 )
 
-        periodic_enabled = PeriodicTask.objects.filter(enabled=True).count()
+        periodic_enabled = PeriodicTask.objects.using(db_alias).filter(enabled=True).count()
         self.stdout.write(
             self.style.MIGRATE_HEADING(
                 f"\nPeriodic tasks enabled: {periodic_enabled}"

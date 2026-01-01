@@ -34,6 +34,7 @@ python manage.py reproq worker --concurrency 20 --queues default,high
 Notes:
 - `--config` loads a YAML/TOML config file.
 - `--dsn` overrides `DATABASE_URL` (and `DATABASE_URL` is optional if a config file is supplied).
+- Use `--database` to pick a Django database alias when you route queues to multiple databases.
 - If `ALLOWED_TASK_MODULES` is unset, the worker auto-configures it from discovered tasks.
 
 ## beat
@@ -41,6 +42,19 @@ Start the periodic task scheduler. Run exactly one beat process per database.
 
 ```bash
 python manage.py reproq beat --interval 30s
+```
+
+One-shot mode (for crontab or low-memory environments):
+
+```bash
+python manage.py reproq beat --once
+```
+
+## schedule
+Cron-friendly alias for `beat --once`.
+
+```bash
+python manage.py reproq schedule
 ```
 
 ## pg-cron
@@ -59,6 +73,8 @@ If you want deployments to succeed even when `pg_cron` is unavailable, use:
 ```bash
 python manage.py reproq pg-cron --install --if-supported
 ```
+
+Use `--database` to target a specific database alias.
 
 ## install
 Download (or build) the worker binary.
@@ -132,6 +148,8 @@ Show task counts by status and active workers.
 python manage.py reproq status
 ```
 
+Use `--database` to scope to one alias or `--all-databases` to aggregate.
+
 Example output:
 ```
 📊 Reproq Statistics
@@ -152,6 +170,7 @@ python manage.py reproq logs --id 1234 --show-path
 ```
 
 `--tail` controls how many lines to show and `--max-bytes` caps the read size.
+Aliased IDs (`queues:123`) are supported when multiple databases are configured.
 
 ## cancel
 Request cancellation for a running task. The worker enforces cancellation on the next heartbeat.
@@ -159,6 +178,8 @@ Request cancellation for a running task. The worker enforces cancellation on the
 ```bash
 python manage.py reproq cancel --id 1234
 ```
+
+Aliased IDs (`queues:123`) are supported when multiple databases are configured.
 
 ## allowlist
 Compute the module allowlist from installed task modules.
@@ -177,6 +198,8 @@ Requeue or fail tasks with expired leases.
 python manage.py reproq reclaim --older-than 5m --action requeue
 ```
 
+Use `--database` or `--all-databases` for multi-DB setups.
+
 ## prune-workers
 Delete workers not seen recently.
 
@@ -184,11 +207,39 @@ Delete workers not seen recently.
 python manage.py reproq prune-workers --older-than 10m
 ```
 
+Use `--database` or `--all-databases` for multi-DB setups.
+
 ## prune-successful
 Delete successful task runs older than a cutoff.
 
 ```bash
 python manage.py reproq prune-successful --older-than 30d
+```
+
+Use `--database` or `--all-databases` for multi-DB setups.
+
+## prune
+Delete task runs by status and age.
+
+```bash
+python manage.py reproq prune --statuses SUCCESSFUL,FAILED --older-than 30d
+```
+
+Use `--database` or `--all-databases` for multi-DB setups.
+
+## sync-recurring
+Sync code-defined recurring tasks into `periodic_tasks`.
+
+```bash
+python manage.py reproq sync-recurring
+```
+
+## pause-queue / resume-queue
+Pause or resume a queue (prevents new claims while paused).
+
+```bash
+python manage.py reproq pause-queue --queue maintenance
+python manage.py reproq resume-queue --queue maintenance
 ```
 
 ## systemd

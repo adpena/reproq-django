@@ -6,6 +6,8 @@ from django.tasks import TaskResultStatus
 from django.tasks.exceptions import TaskResultDoesNotExist
 from asgiref.sync import sync_to_async
 
+from .db import parse_result_id
+
 if TYPE_CHECKING:
     from .backend import ReproqBackend
 
@@ -13,15 +15,18 @@ class TaskResultProxy:
     """
     A robust proxy for Django Task results that avoids undocumented internals.
     """
-    def __init__(self, result_id: str, backend: ReproqBackend):
+    def __init__(self, result_id: str, backend: ReproqBackend, db_alias: str | None = None, raw_id: str | None = None):
         self.id = result_id
         self.backend = backend
+        alias, resolved_id = parse_result_id(raw_id or result_id)
+        self.db_alias = db_alias or alias
+        self._raw_id = resolved_id
         self._data = None
 
     def refresh(self):
         from .models import TaskRun
         try:
-            self._data = TaskRun.objects.get(result_id=self.id)
+            self._data = TaskRun.objects.using(self.db_alias).get(result_id=self._raw_id)
         except TaskRun.DoesNotExist:
             raise TaskResultDoesNotExist(self.id)
         return self
@@ -34,6 +39,10 @@ class TaskResultProxy:
         if self._data is None:
             self.refresh()
         return self._data
+
+    @property
+    def result_id(self) -> str:
+        return self._raw_id
 
     @property
     def status(self) -> TaskResultStatus:
@@ -67,6 +76,8 @@ class TaskResultProxy:
     def worker_ids(self): return self.data.worker_ids
     @property
     def errors(self): return self.data.errors_json
+    @property
+    def metadata(self): return self.data.metadata_json or {}
 
     @property
     def result(self) -> Any:

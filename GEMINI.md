@@ -21,6 +21,9 @@ The binary location is resolved in this order:
 ## Periodic Tasks
 Schedules live in the `PeriodicTask` model and are executed by `python manage.py reproq beat`.
 Run exactly one beat process per database.
+Use `python manage.py reproq beat --once` for cron-driven, low-memory scheduling.
+Code-defined schedules can be registered with `reproq_django.recurring.recurring` and
+synced via `python manage.py reproq sync-recurring`.
 
 Example:
 ```python
@@ -43,6 +46,11 @@ To trigger immediately, set `next_run_at = timezone.now()` or call `enqueue()` o
 
 ## Developer Note
 When modifying the Django models or backend logic, ensure compatibility with the Go worker's claiming SQL (found in `reproq-worker/internal/queue/queue.go`).
+
+## Multi-Database Queues
+Queue routing is controlled by `REPROQ_QUEUE_DATABASES` and `REPROQ_DEFAULT_DB_ALIAS`.
+When multiple queue databases are configured, task result IDs may be prefixed with
+the database alias (control via `REPROQ_RESULT_ID_WITH_ALIAS`).
 
 ### Observability & Heatmaps
 - Surface rich statistics via `reproq_stats_api` to support TUI dashboards.
@@ -69,3 +77,9 @@ If you are an AI agent analyzing this project:
 - **Execution**: The worker invokes `python -m reproq_django.executor`. See `executor.py` for the stdin/stdout protocol logic.
 - **Workflows**: See `workflows.py` for Chain/Group implementation details.
 - **Initialization**: Always recommend `python manage.py reproq init` for setup.
+
+## Task Schema Additions
+Recent additions include:
+- `concurrency_key`/`concurrency_limit` in `task_runs` and `periodic_tasks`.
+- `metadata_json` for task progress metadata.
+- `reproq_queue_controls` for queue pause/resume.

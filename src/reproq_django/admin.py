@@ -8,7 +8,7 @@ from django.db.models import Count, Q
 from datetime import timedelta
 from django.urls import path, reverse
 from django.http import HttpResponseRedirect
-from .models import TaskRun, Worker, PeriodicTask, RateLimit, WorkflowRun
+from .models import TaskRun, Worker, PeriodicTask, RateLimit, WorkflowRun, QueueControl
 from .serialization import spec_hash_for
 
 def format_json(field_data):
@@ -55,22 +55,49 @@ class WorkerAdmin(admin.ModelAdmin):
         return format_html('<b style="color: {};">● {}</b>', color, label)
     status_icon.short_description = "Status"
 
-    def has_add_permission(self, request): return False
-
     @admin.action(description="Delete stale workers (last seen > 10m)")
     def delete_stale_workers(self, request, queryset):
         cutoff = timezone.now() - timedelta(minutes=10)
-        stale = Worker.objects.filter(last_seen_at__lt=cutoff)
+        stale = queryset.filter(last_seen_at__lt=cutoff)
         count = stale.count()
         stale.delete()
         self.message_user(request, f"Deleted {count} stale worker(s).", messages.SUCCESS)
 
+    def has_add_permission(self, request): return False
+
+
+@admin.register(QueueControl)
+class QueueControlAdmin(admin.ModelAdmin):
+    list_display = ("queue_name", "paused", "paused_at", "reason", "updated_at")
+    search_fields = ("queue_name", "reason")
+    actions = ["pause_queues", "resume_queues"]
+
+    @admin.action(description="Pause selected queues")
+    def pause_queues(self, request, queryset):
+        now = timezone.now()
+        updated = queryset.update(paused=True, paused_at=now, updated_at=now)
+        self.message_user(request, f"Paused {updated} queue(s).", messages.SUCCESS)
+
+    @admin.action(description="Resume selected queues")
+    def resume_queues(self, request, queryset):
+        now = timezone.now()
+        updated = queryset.update(paused=False, paused_at=None, updated_at=now)
+        self.message_user(request, f"Resumed {updated} queue(s).", messages.SUCCESS)
+
 @admin.register(PeriodicTask)
 class PeriodicTaskAdmin(admin.ModelAdmin):
-    list_display = ("name", "cron_expr", "task_path", "next_run_at", "enabled", "last_run_at")
+    list_display = ("name", "cron_expr", "task_path", "queue_name", "priority", "concurrency_display", "next_run_at", "enabled", "last_run_at")
     list_filter = ("enabled", "queue_name")
     search_fields = ("name", "task_path")
     ordering = ("next_run_at",)
+
+    def concurrency_display(self, obj):
+        if obj.concurrency_limit and obj.concurrency_key:
+            return f"{obj.concurrency_key} ({obj.concurrency_limit})"
+        if obj.concurrency_limit:
+            return f"limit={obj.concurrency_limit}"
+        return "-"
+    concurrency_display.short_description = "Concurrency"
 
 @admin.register(WorkflowRun)
 class WorkflowRunAdmin(admin.ModelAdmin):
@@ -87,7 +114,7 @@ class RateLimitAdmin(admin.ModelAdmin):
 @admin.register(TaskRun)
 class TaskRunAdmin(admin.ModelAdmin):
     list_display = (
-        "result_id", "status_badge", "lease_status", "lock_key", "queue_name", "priority", 
+        "result_id", "status_badge", "lease_status", "lock_key", "concurrency_info", "queue_name", "priority",
         "enqueued_at", "duration", "attempts_display", "workflow_info"
     )
     list_filter = ("status", LeaseStatusFilter, "queue_name", "backend_alias")
@@ -116,6 +143,7 @@ class TaskRunAdmin(admin.ModelAdmin):
     actions = [
         "replay_tasks",
         "retry_failed_tasks",
+        "discard_failed_tasks",
         "cancel_tasks",
         "delete_successful_tasks",
         "create_expired_lease_test_task",
@@ -166,6 +194,14 @@ class TaskRunAdmin(admin.ModelAdmin):
             diff = timezone.now() - obj.started_at
             return f"{diff.total_seconds():.1f}s..."
         return "-"
+
+    def concurrency_info(self, obj):
+        if obj.concurrency_limit and obj.concurrency_key:
+            return f"{obj.concurrency_key} ({obj.concurrency_limit})"
+        if obj.concurrency_limit:
+            return f"limit={obj.concurrency_limit}"
+        return "-"
+    concurrency_info.short_description = "Concurrency"
     
     def attempts_display(self, obj):
         return f"{obj.attempts}/{obj.max_attempts}"
@@ -244,11 +280,22 @@ class TaskRunAdmin(admin.ModelAdmin):
         updated = queryset.filter(status="FAILED").update(status="READY", run_after=timezone.now())
         self.message_user(request, f"Successfully set {updated} failed tasks to READY.", messages.SUCCESS)
 
+    @admin.action(description="Discard failed tasks (mark as CANCELLED)")
+    def discard_failed_tasks(self, request, queryset):
+        now = timezone.now()
+        updated = queryset.filter(status="FAILED").update(
+            status="CANCELLED",
+            finished_at=now,
+            last_error="Discarded in admin",
+            updated_at=now,
+        )
+        self.message_user(request, f"Discarded {updated} failed task(s).", messages.SUCCESS)
+
     @admin.action(description="Cancel selected tasks")
     def cancel_tasks(self, request, queryset):
         now = timezone.now()
         running = queryset.filter(status="RUNNING").update(cancel_requested=True, updated_at=now)
-        ready = queryset.filter(status="READY").update(status="CANCELLED", updated_at=now)
+        ready = queryset.filter(status="READY").update(status="CANCELLED", finished_at=now, updated_at=now)
         self.message_user(
             request,
             f"Requested cancellation for {running} running task(s); cancelled {ready} ready task(s).",

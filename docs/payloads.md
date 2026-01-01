@@ -46,6 +46,10 @@ def export_report(report_id):
 Reproq computes `spec_hash` using canonical JSON with Django's JSON encoder. It sorts keys to enforce determinism while safely encoding types like `Decimal` and `UUID` as strings. Prefer simple JSON-serializable inputs whenever possible.
 Datetime values are encoded to ISO 8601 strings by Django's JSON encoder.
 
+Reproq also supports rich argument serialization:
+- `timedelta` values are encoded as `{ "__reproq_type__": "timedelta", ... }`.
+- Django models are encoded by `{ "__reproq_type__": "model", "app_label": "...", "model": "...", "pk": "..." }`.
+
 ## 4. Executor Settings Resolution
 
 The executor (`python -m reproq_django.executor`) resolves settings in this order:
@@ -82,6 +86,8 @@ Common fields in the spec JSON:
 - `queue_name`: Queue name (string).
 - `priority`: Integer priority.
 - `lock_key`: Optional string for concurrency control.
+- `concurrency_key`: Optional string for concurrency limits.
+- `concurrency_limit`: Optional integer limit for the concurrency key.
 - `run_after`: ISO 8601 timestamp or `null`.
 - `exec.timeout_seconds`: Max execution seconds.
 - `exec.max_attempts`: Max attempts before final failure.
@@ -100,6 +106,8 @@ Example payload:
   "queue_name": "default",
   "priority": 0,
   "lock_key": null,
+  "concurrency_key": null,
+  "concurrency_limit": 0,
   "run_after": null,
   "exec": {"timeout_seconds": 900, "max_attempts": 3},
   "provenance": {"code_ref": "v1.2.3", "pip_lock_hash": "sha256:..."},

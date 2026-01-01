@@ -11,6 +11,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../s
 
 from django.conf import settings
 from django.tasks import Task, TaskResultStatus
+from django.test import override_settings
 from django.utils import timezone as dj_timezone
 
 if not settings.configured:
@@ -28,8 +29,24 @@ if not settings.configured:
     django.setup()
 
 from reproq_django.backend import ReproqBackend
+from reproq_django.db import (
+    format_result_id,
+    parse_result_id,
+    resolve_queue_db,
+    should_prefix_result_ids,
+)
 from reproq_django.proxy import TaskResultProxy
 from reproq_django.models import TaskRun, PeriodicTask, Worker
+
+try:
+    from django.tasks.exceptions import InvalidTask
+except Exception:
+    InvalidTask = ValueError
+
+try:
+    from django.tasks.exceptions import InvalidTaskError
+except Exception:
+    InvalidTaskError = InvalidTask
 
 def my_func(*args, **kwargs):
     return args or kwargs
@@ -60,6 +77,11 @@ class TestReproqBackend(unittest.TestCase):
         self.assertEqual(run.task_path, "test_module.my_func")
         self.assertEqual(run.spec_json["args"], [1, 2])
         self.assertEqual(run.spec_json["kwargs"], {"debug": True})
+
+    def test_enqueue_rejects_unknown_queue(self):
+        my_func.__module__ = "test_module"
+        with self.assertRaises((InvalidTaskError, InvalidTask)):
+            Task(func=my_func, priority=0, queue_name="unknown", backend="default", run_after=None)
 
     def test_dedupe_active(self):
         my_func.__module__ = "test_module"
@@ -104,6 +126,27 @@ class TestReproqBackend(unittest.TestCase):
 
         self.assertNotEqual(res1.id, res2.id)
         self.assertEqual(TaskRun.objects.count(), 2)
+
+    def test_concurrency_fields_in_spec(self):
+        my_func.__module__ = "test_module"
+        task = Task(func=my_func, priority=0, queue_name="q", backend="default", run_after=None)
+        result = self.backend.enqueue(
+            task,
+            (),
+            {"concurrency_key": "user:42", "concurrency_limit": 2, "debug": True},
+        )
+        run = TaskRun.objects.get(result_id=result.id)
+        self.assertEqual(run.spec_json["concurrency_key"], "user:42")
+        self.assertEqual(run.spec_json["concurrency_limit"], 2)
+        self.assertEqual(run.spec_json["kwargs"], {"debug": True})
+
+    def test_save_metadata_updates_taskrun(self):
+        my_func.__module__ = "test_module"
+        task = Task(func=my_func, priority=0, queue_name="q", backend="default", run_after=None)
+        result = self.backend.enqueue(task, (), {})
+        self.backend.save_metadata(result.id, {"step": "queued"})
+        run = TaskRun.objects.get(result_id=result.id)
+        self.assertEqual(run.metadata_json, {"step": "queued"})
 
     def test_spec_hash_handles_decimal_and_uuid(self):
         my_func.__module__ = "test_module"
@@ -252,6 +295,23 @@ class TestTaskResultProxyStatusMapping(unittest.TestCase):
             self.assertIs(proxy.wait(timeout=0.1, poll_interval=0), proxy)
         else:
             self.assertEqual(proxy.raw_status, "CANCELLED")
+
+class TestMultiDatabaseRouting(unittest.TestCase):
+    @override_settings(
+        DATABASES={
+            "default": {"ENGINE": "django.db.backends.sqlite3", "NAME": ":memory:"},
+            "secondary": {"ENGINE": "django.db.backends.sqlite3", "NAME": ":memory:"},
+        },
+        REPROQ_QUEUE_DATABASES={"secondary-queue": "secondary"},
+    )
+    def test_queue_routes_to_secondary(self):
+        alias = resolve_queue_db("secondary-queue")
+        self.assertEqual(alias, "secondary")
+        self.assertTrue(should_prefix_result_ids())
+        formatted = format_result_id(123, "secondary")
+        parsed_alias, raw_id = parse_result_id(formatted)
+        self.assertEqual(parsed_alias, "secondary")
+        self.assertEqual(raw_id, "123")
 
 if __name__ == "__main__":
     unittest.main()

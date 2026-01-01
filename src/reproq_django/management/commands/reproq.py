@@ -14,10 +14,12 @@ import importlib.resources
 from datetime import timedelta
 from django.core.management.base import BaseCommand, CommandError
 from django.conf import settings
-from django.db import connection
+from django.db import connection, connections
 from django.db.models import Q
 from django.utils import timezone
-from ...models import PeriodicTask, TaskRun
+from ...models import PeriodicTask, TaskRun, QueueControl
+from ...db import default_db_alias, parse_result_id, queue_db_aliases
+from ...recurring import sync_recurring_tasks
 
 class Command(BaseCommand):
     help = "Unified Reproq management command"
@@ -31,6 +33,7 @@ class Command(BaseCommand):
         worker_parser.add_argument("--concurrency", type=int, default=10)
         worker_parser.add_argument("--queues", type=str, default="", help="Comma-separated queue names")
         worker_parser.add_argument("--queue", type=str, default="default", help="Deprecated (use --queues)")
+        worker_parser.add_argument("--database", type=str, default="", help="Django database alias for worker DSN")
         worker_parser.add_argument("--allowed-task-modules", type=str, default="", help="Comma-separated task module allow-list")
         worker_parser.add_argument("--logs-dir", type=str, default="", help="Directory to persist stdout/stderr logs")
         worker_parser.add_argument("--payload-mode", type=str, default="", help="Payload mode: stdin|file|inline")
@@ -49,6 +52,16 @@ class Command(BaseCommand):
         beat_parser = subparsers.add_parser("beat", help="Start the periodic task scheduler (beat)")
         beat_parser.add_argument("--config", type=str, default="", help="Path to reproq config file")
         beat_parser.add_argument("--interval", type=str, default="30s")
+        beat_parser.add_argument("--once", action="store_true", help="Enqueue due periodic tasks once and exit")
+        beat_parser.add_argument("--database", type=str, default="", help="Django database alias for beat DSN")
+
+        schedule_parser = subparsers.add_parser(
+            "schedule",
+            help="Enqueue due periodic tasks once and exit (cron-friendly)",
+        )
+        schedule_parser.add_argument("--config", type=str, default="", help="Path to reproq config file")
+        schedule_parser.add_argument("--interval", type=str, default="30s")
+        schedule_parser.add_argument("--database", type=str, default="", help="Django database alias for beat DSN")
 
         # PG Cron
         pgcron_parser = subparsers.add_parser(
@@ -81,6 +94,7 @@ class Command(BaseCommand):
             action="store_true",
             help="Skip if pg_cron is unavailable (non-Postgres or extension missing)",
         )
+        pgcron_parser.add_argument("--database", type=str, default="", help="Django database alias for pg_cron")
 
         # Migrate
         subparsers.add_parser("migrate-worker", help="Apply Go worker SQL optimizations")
@@ -107,8 +121,12 @@ class Command(BaseCommand):
         init_parser.add_argument("--tag", type=str, default="latest", help="GitHub release tag")
 
         # Stats
-        subparsers.add_parser("stats", help="Show task execution statistics")
-        subparsers.add_parser("status", help="Show task execution statistics (alias)")
+        stats_parser = subparsers.add_parser("stats", help="Show task execution statistics")
+        stats_parser.add_argument("--database", type=str, default="", help="Django database alias")
+        stats_parser.add_argument("--all-databases", action="store_true", help="Aggregate across configured databases")
+        status_parser = subparsers.add_parser("status", help="Show task execution statistics (alias)")
+        status_parser.add_argument("--database", type=str, default="", help="Django database alias")
+        status_parser.add_argument("--all-databases", action="store_true", help="Aggregate across configured databases")
 
         # Stress Test
         stress_parser = subparsers.add_parser("stress-test", help="Enqueue a large number of tasks for benchmarking")
@@ -156,16 +174,40 @@ class Command(BaseCommand):
             help="Config file to update when using --write",
         )
 
+        # Recurring sync
+        sync_parser = subparsers.add_parser(
+            "sync-recurring",
+            help="Sync @recurring schedules into PeriodicTask rows",
+        )
+        sync_parser.add_argument("--database", type=str, default="", help="Django database alias")
+        sync_parser.add_argument(
+            "--clear-missing",
+            action="store_true",
+            help="Disable schedules not defined in code",
+        )
+
+        # Queue controls
+        pause_parser = subparsers.add_parser("pause-queue", help="Pause a queue")
+        pause_parser.add_argument("queue", type=str, help="Queue name to pause")
+        pause_parser.add_argument("--reason", type=str, default="", help="Optional pause reason")
+        pause_parser.add_argument("--database", type=str, default="", help="Django database alias")
+
+        resume_parser = subparsers.add_parser("resume-queue", help="Resume a queue")
+        resume_parser.add_argument("queue", type=str, help="Queue name to resume")
+        resume_parser.add_argument("--database", type=str, default="", help="Django database alias")
+
         # Logs
         logs_parser = subparsers.add_parser("logs", help="Show task logs from logs_uri")
-        logs_parser.add_argument("--id", type=int, required=True, help="Task result_id")
+        logs_parser.add_argument("--id", type=str, required=True, help="Task result_id (optionally alias:ID)")
         logs_parser.add_argument("--tail", type=int, default=200, help="Tail N lines from the log file")
         logs_parser.add_argument("--max-bytes", type=int, default=1_000_000, help="Max bytes to read")
         logs_parser.add_argument("--show-path", action="store_true", help="Only print logs_uri path")
+        logs_parser.add_argument("--database", type=str, default="", help="Django database alias")
 
         # Cancel
         cancel_parser = subparsers.add_parser("cancel", help="Request cancellation for a task run")
-        cancel_parser.add_argument("--id", type=int, required=True, help="Task result_id")
+        cancel_parser.add_argument("--id", type=str, required=True, help="Task result_id (optionally alias:ID)")
+        cancel_parser.add_argument("--database", type=str, default="", help="Django database alias")
 
         # Upgrade
         upgrade_parser = subparsers.add_parser("upgrade", help="Upgrade the Go worker binary")
@@ -227,6 +269,8 @@ class Command(BaseCommand):
             action="store_true",
             help="Also target RUNNING tasks with no lease timestamp",
         )
+        reclaim_parser.add_argument("--database", type=str, default="", help="Django database alias")
+        reclaim_parser.add_argument("--all-databases", action="store_true", help="Reclaim across configured databases")
 
         prune_workers = subparsers.add_parser(
             "prune-workers",
@@ -242,6 +286,8 @@ class Command(BaseCommand):
             action="store_true",
             help="Show how many workers would be deleted",
         )
+        prune_workers.add_argument("--database", type=str, default="", help="Django database alias")
+        prune_workers.add_argument("--all-databases", action="store_true", help="Prune across configured databases")
 
         prune_successful = subparsers.add_parser(
             "prune-successful",
@@ -263,6 +309,44 @@ class Command(BaseCommand):
             action="store_true",
             help="Show how many tasks would be deleted",
         )
+        prune_successful.add_argument("--database", type=str, default="", help="Django database alias")
+        prune_successful.add_argument("--all-databases", action="store_true", help="Prune across configured databases")
+
+        prune_parser = subparsers.add_parser(
+            "prune",
+            help="Delete task runs by status and age",
+        )
+        prune_parser.add_argument(
+            "--statuses",
+            type=str,
+            default="SUCCESSFUL,FAILED,CANCELLED",
+            help="Comma-separated statuses to delete",
+        )
+        prune_parser.add_argument(
+            "--older-than",
+            default="7d",
+            help="Delete tasks older than this (e.g., 7d, 30d)",
+        )
+        prune_parser.add_argument(
+            "--limit",
+            type=int,
+            default=0,
+            help="Maximum number of tasks to delete (0 = no limit)",
+        )
+        prune_parser.add_argument(
+            "--field",
+            type=str,
+            default="finished_at",
+            choices=["finished_at", "updated_at", "enqueued_at", "started_at"],
+            help="Timestamp field used for the cutoff",
+        )
+        prune_parser.add_argument(
+            "--dry-run",
+            action="store_true",
+            help="Show how many tasks would be deleted",
+        )
+        prune_parser.add_argument("--database", type=str, default="", help="Django database alias")
+        prune_parser.add_argument("--all-databases", action="store_true", help="Prune across configured databases")
 
     def handle(self, *args, **options):
         subcommand = options["subcommand"]
@@ -278,9 +362,9 @@ class Command(BaseCommand):
         elif subcommand == "upgrade":
             self.run_upgrade(options)
         elif subcommand == "stats":
-            self.run_stats()
+            self.run_stats(options)
         elif subcommand == "status":
-            self.run_stats()
+            self.run_stats(options)
         elif subcommand == "stress-test":
             self.run_stress_test(options)
         elif subcommand == "systemd":
@@ -288,9 +372,15 @@ class Command(BaseCommand):
         elif subcommand == "install":
             self.run_install(options)
         elif subcommand == "migrate-worker":
-            self.run_migrate()
+            self.run_migrate(options)
         elif subcommand == "allowlist":
             self.run_allowlist(options)
+        elif subcommand == "sync-recurring":
+            self.run_sync_recurring(options)
+        elif subcommand == "pause-queue":
+            self.run_pause_queue(options)
+        elif subcommand == "resume-queue":
+            self.run_resume_queue(options)
         elif subcommand == "logs":
             self.run_logs(options)
         elif subcommand == "cancel":
@@ -301,8 +391,13 @@ class Command(BaseCommand):
             self.run_prune_workers(options)
         elif subcommand == "prune-successful":
             self.run_prune_successful(options)
+        elif subcommand == "prune":
+            self.run_prune(options)
         elif subcommand == "pg-cron":
             self.run_pg_cron(options)
+        elif subcommand == "schedule":
+            options["once"] = True
+            self.run_worker_or_beat("beat", options)
         elif subcommand in ["worker", "beat"]:
             self.run_worker_or_beat(subcommand, options)
 
@@ -320,6 +415,7 @@ class Command(BaseCommand):
         beat_cmd_env = os.getenv("REPROQ_BEAT_CMD", "")
         beat_cmd_normalized = beat_cmd_env.strip().lower()
         beat_disabled = beat_cmd_normalized in {"", "0", "false", "off", "disabled", "none"}
+        db_alias = default_db_alias()
         worker_bin, resolved_bin, exists = self._resolve_worker_bin()
         self.stdout.write(f"Resolved worker binary: {resolved_bin or worker_bin}")
         try:
@@ -331,9 +427,10 @@ class Command(BaseCommand):
                 self.stderr.write(self.style.ERROR(f"   Resolved path: {resolved_bin}"))
             failed = True
 
-        dsn = self.get_dsn()
+        dsn = self.get_dsn(None if db_alias == "default" else db_alias)
         if dsn:
-            source = "DATABASE_URL" if os.environ.get("DATABASE_URL") else "DATABASES"
+            use_env = bool(os.environ.get("DATABASE_URL")) and db_alias == "default"
+            source = "DATABASE_URL" if use_env else "DATABASES"
             self.stdout.write(self.style.SUCCESS(f"✅ Database DSN detected ({source})."))
             self.stdout.write(f"DSN: {self._mask_dsn(dsn)}")
         else:
@@ -343,8 +440,11 @@ class Command(BaseCommand):
             )
             failed = True
 
-        with connection.cursor() as cursor:
-            tables = connection.introspection.table_names(cursor)
+        conn = connections[db_alias]
+        if db_alias != "default":
+            self.stdout.write(f"Database alias: {db_alias}")
+        with conn.cursor() as cursor:
+            tables = conn.introspection.table_names(cursor)
             if "task_runs" in tables:
                 self.stdout.write(self.style.SUCCESS("✅ Database schema present."))
             else:
@@ -357,7 +457,7 @@ class Command(BaseCommand):
                         "LOW_MEMORY_MODE enabled; reproq-beat is disabled."
                     )
                 )
-                if connection.vendor != "postgresql":
+                if conn.vendor != "postgresql":
                     self.stdout.write(
                         self.style.WARNING(
                             "Periodic schedules require pg_cron; unavailable on this database."
@@ -381,7 +481,7 @@ class Command(BaseCommand):
                         "reproq-beat disabled via REPROQ_BEAT_CMD; periodic schedules require pg_cron."
                     )
                 )
-                if connection.vendor != "postgresql":
+                if conn.vendor != "postgresql":
                     self.stdout.write(
                         self.style.WARNING(
                             "pg_cron unavailable on this database; periodic schedules will not run."
@@ -519,6 +619,7 @@ class Command(BaseCommand):
                 "reproq_workers",
                 "rate_limits",
                 "workflow_runs",
+                "reproq_queue_controls",
             }
             missing = sorted(required_tables - tables)
             if missing:
@@ -786,7 +887,23 @@ WantedBy=multi-user.target
             return timedelta(days=count)
         raise CommandError("Invalid duration unit.")
 
+    def _resolve_db_alias(self, options, result_id: str | None = None) -> str:
+        alias = (options or {}).get("database") or ""
+        if alias:
+            return alias
+        if result_id:
+            parsed_alias, _ = parse_result_id(result_id)
+            return parsed_alias
+        return default_db_alias()
+
+    def _resolve_db_aliases(self, options) -> list[str]:
+        if (options or {}).get("all_databases"):
+            return queue_db_aliases()
+        alias = (options or {}).get("database") or ""
+        return [alias or default_db_alias()]
+
     def run_reclaim(self, options):
+        aliases = self._resolve_db_aliases(options)
         now = timezone.now()
         older_than = self._parse_duration(options["older_than"])
         cutoff = now - older_than
@@ -795,107 +912,187 @@ WantedBy=multi-user.target
         if options["include_null_lease"]:
             lease_filter |= Q(leased_until__isnull=True)
 
-        queryset = TaskRun.objects.filter(
-            status="RUNNING",
-            cancel_requested=False,
-        ).filter(lease_filter)
+        for alias in aliases:
+            queryset = TaskRun.objects.using(alias).filter(
+                status="RUNNING",
+                cancel_requested=False,
+            ).filter(lease_filter)
 
-        if options["limit"] and options["limit"] > 0:
-            ids = list(
-                queryset.order_by("leased_until", "result_id")
-                .values_list("result_id", flat=True)[: options["limit"]]
-            )
-            queryset = TaskRun.objects.filter(result_id__in=ids)
+            if options["limit"] and options["limit"] > 0:
+                ids = list(
+                    queryset.order_by("leased_until", "result_id")
+                    .values_list("result_id", flat=True)[: options["limit"]]
+                )
+                queryset = TaskRun.objects.using(alias).filter(result_id__in=ids)
 
-        count = queryset.count()
-        if options["dry_run"]:
-            self.stdout.write(
-                self.style.WARNING(f"Dry run: {count} task(s) match reclaim criteria.")
-            )
-            return
+            count = queryset.count()
+            prefix = f"[{alias}] " if len(aliases) > 1 else ""
+            if options["dry_run"]:
+                self.stdout.write(
+                    self.style.WARNING(f"{prefix}Dry run: {count} task(s) match reclaim criteria.")
+                )
+                continue
 
-        if count == 0:
-            self.stdout.write(self.style.SUCCESS("No expired leases found."))
-            return
+            if count == 0:
+                self.stdout.write(self.style.SUCCESS(f"{prefix}No expired leases found."))
+                continue
 
-        action = options["action"]
-        if action == "requeue":
-            updated = queryset.update(
-                status="READY",
-                run_after=now,
-                leased_until=None,
-                leased_by=None,
-                started_at=None,
-                finished_at=None,
-            )
-            self.stdout.write(self.style.SUCCESS(f"Requeued {updated} task(s)."))
-            return
+            action = options["action"]
+            if action == "requeue":
+                updated = queryset.update(
+                    status="READY",
+                    run_after=now,
+                    leased_until=None,
+                    leased_by=None,
+                    started_at=None,
+                    finished_at=None,
+                )
+                self.stdout.write(self.style.SUCCESS(f"{prefix}Requeued {updated} task(s)."))
+                continue
 
-        failures = 0
-        for run in queryset:
-            errors = list(run.errors_json or [])
-            errors.append(
-                {
-                    "at": now.isoformat(),
-                    "kind": "reclaim",
-                    "message": "Lease expired; marking task failed.",
-                }
-            )
-            run.status = "FAILED"
-            run.finished_at = now
-            run.last_attempted_at = now
-            run.leased_until = None
-            run.leased_by = None
-            run.errors_json = errors
-            run.save(
-                update_fields=[
-                    "status",
-                    "finished_at",
-                    "last_attempted_at",
-                    "leased_until",
-                    "leased_by",
-                    "errors_json",
-                ]
-            )
-            failures += 1
+            failures = 0
+            for run in queryset:
+                errors = list(run.errors_json or [])
+                errors.append(
+                    {
+                        "at": now.isoformat(),
+                        "kind": "reclaim",
+                        "message": "Lease expired; marking task failed.",
+                    }
+                )
+                run.status = "FAILED"
+                run.finished_at = now
+                run.last_attempted_at = now
+                run.leased_until = None
+                run.leased_by = None
+                run.errors_json = errors
+                run.save(
+                    update_fields=[
+                        "status",
+                        "finished_at",
+                        "last_attempted_at",
+                        "leased_until",
+                        "leased_by",
+                        "errors_json",
+                    ]
+                )
+                failures += 1
 
-        self.stdout.write(self.style.SUCCESS(f"Marked {failures} task(s) failed."))
+            self.stdout.write(self.style.SUCCESS(f"{prefix}Marked {failures} task(s) failed."))
 
     def run_prune_workers(self, options):
         from reproq_django.models import Worker
         cutoff = timezone.now() - self._parse_duration(options["older_than"])
-        queryset = Worker.objects.filter(last_seen_at__lt=cutoff)
-        count = queryset.count()
-        if options["dry_run"]:
-            self.stdout.write(self.style.WARNING(f"Dry run: {count} worker(s) would be deleted."))
-            return
-        queryset.delete()
-        self.stdout.write(self.style.SUCCESS(f"Deleted {count} stale worker(s)."))
+        aliases = self._resolve_db_aliases(options)
+        for alias in aliases:
+            queryset = Worker.objects.using(alias).filter(last_seen_at__lt=cutoff)
+            count = queryset.count()
+            prefix = f"[{alias}] " if len(aliases) > 1 else ""
+            if options["dry_run"]:
+                self.stdout.write(self.style.WARNING(f"{prefix}Dry run: {count} worker(s) would be deleted."))
+                continue
+            queryset.delete()
+            self.stdout.write(self.style.SUCCESS(f"{prefix}Deleted {count} stale worker(s)."))
 
     def run_prune_successful(self, options):
         from reproq_django.models import TaskRun
         cutoff = timezone.now() - self._parse_duration(options["older_than"])
-        queryset = TaskRun.objects.filter(status="SUCCESSFUL", finished_at__lt=cutoff)
-        if options["limit"] and options["limit"] > 0:
-            ids = list(
-                queryset.order_by("finished_at", "result_id")
-                .values_list("result_id", flat=True)[: options["limit"]]
-            )
-            queryset = TaskRun.objects.filter(result_id__in=ids)
-        count = queryset.count()
-        if options["dry_run"]:
-            self.stdout.write(self.style.WARNING(f"Dry run: {count} task(s) would be deleted."))
-            return
-        queryset.delete()
-        self.stdout.write(self.style.SUCCESS(f"Deleted {count} successful task(s)."))
+        aliases = self._resolve_db_aliases(options)
+        for alias in aliases:
+            queryset = TaskRun.objects.using(alias).filter(status="SUCCESSFUL", finished_at__lt=cutoff)
+            if options["limit"] and options["limit"] > 0:
+                ids = list(
+                    queryset.order_by("finished_at", "result_id")
+                    .values_list("result_id", flat=True)[: options["limit"]]
+                )
+                queryset = TaskRun.objects.using(alias).filter(result_id__in=ids)
+            count = queryset.count()
+            prefix = f"[{alias}] " if len(aliases) > 1 else ""
+            if options["dry_run"]:
+                self.stdout.write(self.style.WARNING(f"{prefix}Dry run: {count} task(s) would be deleted."))
+                continue
+            queryset.delete()
+            self.stdout.write(self.style.SUCCESS(f"{prefix}Deleted {count} successful task(s)."))
 
-    def _backfill_task_path(self, batch_size=1000):
-        if connection.vendor != "postgresql":
+    def run_prune(self, options):
+        from reproq_django.models import TaskRun
+
+        cutoff = timezone.now() - self._parse_duration(options["older_than"])
+        statuses = [s.strip().upper() for s in options["statuses"].split(",") if s.strip()]
+        field = options.get("field") or "finished_at"
+        aliases = self._resolve_db_aliases(options)
+
+        for alias in aliases:
+            queryset = TaskRun.objects.using(alias).filter(status__in=statuses)
+            queryset = queryset.filter(**{f"{field}__lt": cutoff})
+            if options["limit"] and options["limit"] > 0:
+                ids = list(
+                    queryset.order_by(field, "result_id")
+                    .values_list("result_id", flat=True)[: options["limit"]]
+                )
+                queryset = TaskRun.objects.using(alias).filter(result_id__in=ids)
+            count = queryset.count()
+            prefix = f"[{alias}] " if len(aliases) > 1 else ""
+            if options["dry_run"]:
+                self.stdout.write(self.style.WARNING(f"{prefix}Dry run: {count} task(s) would be deleted."))
+                continue
+            queryset.delete()
+            self.stdout.write(self.style.SUCCESS(f"{prefix}Deleted {count} task(s)."))
+
+    def run_sync_recurring(self, options):
+        alias = options.get("database") or None
+        count = sync_recurring_tasks(
+            using=alias,
+            clear_missing=options.get("clear_missing", False),
+        )
+        if count == 0:
+            self.stdout.write(self.style.WARNING("No recurring tasks found."))
+            return
+        target = alias or "auto"
+        self.stdout.write(self.style.SUCCESS(f"Synced {count} recurring task(s) ({target})."))
+
+    def run_pause_queue(self, options):
+        alias = self._resolve_db_alias(options)
+        queue = options["queue"].strip()
+        if not queue:
+            raise CommandError("Queue name is required.")
+        now = timezone.now()
+        QueueControl.objects.using(alias).update_or_create(
+            queue_name=queue,
+            defaults={
+                "paused": True,
+                "paused_at": now,
+                "reason": options.get("reason") or "",
+                "updated_at": now,
+            },
+        )
+        self.stdout.write(self.style.SUCCESS(f"Paused queue {queue} ({alias})."))
+
+    def run_resume_queue(self, options):
+        alias = self._resolve_db_alias(options)
+        queue = options["queue"].strip()
+        if not queue:
+            raise CommandError("Queue name is required.")
+        now = timezone.now()
+        QueueControl.objects.using(alias).update_or_create(
+            queue_name=queue,
+            defaults={
+                "paused": False,
+                "paused_at": None,
+                "reason": "",
+                "updated_at": now,
+            },
+        )
+        self.stdout.write(self.style.SUCCESS(f"Resumed queue {queue} ({alias})."))
+
+    def _backfill_task_path(self, batch_size=1000, db_alias: str | None = None):
+        conn = connection if db_alias is None else connections[db_alias]
+        if conn.vendor != "postgresql":
             return
 
         self.stdout.write("Backfilling task_path in batches...")
         while True:
-            with connection.cursor() as cursor:
+            with conn.cursor() as cursor:
                 cursor.execute(
                     """
                     WITH candidates AS (
@@ -916,18 +1113,20 @@ WantedBy=multi-user.target
             if not updated:
                 break
 
-    def run_migrate(self):
+    def run_migrate(self, options=None):
+        db_alias = self._resolve_db_alias(options)
+        conn = connections[db_alias]
         # Go specific optimizations (e.g. creating extensions)
-        self.stdout.write("Applying worker-specific optimizations...")
-        with connection.cursor() as cursor:
+        self.stdout.write(f"Applying worker-specific optimizations ({db_alias})...")
+        with conn.cursor() as cursor:
             try:
                 cursor.execute("CREATE EXTENSION IF NOT EXISTS pgcrypto;")
                 self.stdout.write(self.style.SUCCESS("✅ pgcrypto extension enabled."))
             except Exception as e:
                 self.stderr.write(self.style.WARNING(f"⚠️ Could not enable pgcrypto: {e}"))
-        with connection.cursor() as cursor:
-            tables = set(connection.introspection.table_names(cursor))
-        required_tables = {"task_runs", "periodic_tasks", "reproq_workers", "rate_limits", "workflow_runs"}
+        with conn.cursor() as cursor:
+            tables = set(conn.introspection.table_names(cursor))
+        required_tables = {"task_runs", "periodic_tasks", "reproq_workers", "rate_limits", "workflow_runs", "reproq_queue_controls"}
         missing_tables = sorted(required_tables - tables)
         ensure_pre_statements = [
             """
@@ -941,6 +1140,26 @@ WantedBy=multi-user.target
             """
             ALTER TABLE task_runs
             ADD COLUMN IF NOT EXISTS task_path TEXT;
+            """,
+            """
+            ALTER TABLE task_runs
+            ADD COLUMN IF NOT EXISTS metadata_json JSONB NOT NULL DEFAULT '{}'::jsonb;
+            """,
+            """
+            ALTER TABLE task_runs
+            ADD COLUMN IF NOT EXISTS concurrency_key TEXT;
+            """,
+            """
+            ALTER TABLE task_runs
+            ADD COLUMN IF NOT EXISTS concurrency_limit INTEGER NOT NULL DEFAULT 0;
+            """,
+            """
+            ALTER TABLE periodic_tasks
+            ADD COLUMN IF NOT EXISTS concurrency_key TEXT;
+            """,
+            """
+            ALTER TABLE periodic_tasks
+            ADD COLUMN IF NOT EXISTS concurrency_limit INTEGER NOT NULL DEFAULT 0;
             """,
         ]
         ensure_post_statements = [
@@ -989,14 +1208,29 @@ WantedBy=multi-user.target
             ON task_runs (queue_name, COALESCE(run_after, '-infinity'::timestamptz), priority DESC, enqueued_at ASC)
             WHERE status = 'READY';
             """,
+            """
+            CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_task_runs_concurrency_active
+            ON task_runs (concurrency_key, leased_until)
+            WHERE status = 'RUNNING' AND concurrency_key IS NOT NULL;
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS reproq_queue_controls (
+                queue_name TEXT PRIMARY KEY,
+                paused BOOLEAN NOT NULL DEFAULT FALSE,
+                paused_at TIMESTAMPTZ,
+                reason TEXT,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            );
+            """,
         ]
         if not missing_tables:
             self.stdout.write(self.style.SUCCESS("✅ Reproq schema already present."))
-            with connection.cursor() as cursor:
+            with conn.cursor() as cursor:
                 for statement in ensure_pre_statements:
                     cursor.execute(statement)
-            self._backfill_task_path()
-            with connection.cursor() as cursor:
+            self._backfill_task_path(db_alias=db_alias)
+            with conn.cursor() as cursor:
                 for statement in ensure_post_statements:
                     cursor.execute(statement)
             self.stdout.write(self.style.SUCCESS("✅ Reproq schema updated."))
@@ -1026,9 +1260,12 @@ WantedBy=multi-user.target
                 max_attempts INTEGER NOT NULL DEFAULT 3,
                 timeout_seconds INTEGER NOT NULL DEFAULT 900,
                 lock_key TEXT,
+                concurrency_key TEXT,
+                concurrency_limit INTEGER NOT NULL DEFAULT 0,
                 worker_ids JSONB NOT NULL DEFAULT '[]'::jsonb,
                 return_json JSONB,
                 errors_json JSONB NOT NULL DEFAULT '[]'::jsonb,
+                metadata_json JSONB NOT NULL DEFAULT '{}'::jsonb,
                 last_error TEXT,
                 failed_at TIMESTAMPTZ,
                 leased_until TIMESTAMPTZ,
@@ -1122,6 +1359,8 @@ WantedBy=multi-user.target
                 queue_name TEXT NOT NULL DEFAULT 'default',
                 priority INTEGER NOT NULL DEFAULT 0,
                 max_attempts INTEGER NOT NULL DEFAULT 3,
+                concurrency_key TEXT,
+                concurrency_limit INTEGER NOT NULL DEFAULT 0,
                 last_run_at TIMESTAMPTZ,
                 next_run_at TIMESTAMPTZ NOT NULL,
                 enabled BOOLEAN NOT NULL DEFAULT TRUE,
@@ -1133,6 +1372,16 @@ WantedBy=multi-user.target
             CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_periodic_tasks_next_run
             ON periodic_tasks (next_run_at)
             WHERE enabled = TRUE;
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS reproq_queue_controls (
+                queue_name TEXT PRIMARY KEY,
+                paused BOOLEAN NOT NULL DEFAULT FALSE,
+                paused_at TIMESTAMPTZ,
+                reason TEXT,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            );
             """,
             """
             CREATE TABLE IF NOT EXISTS reproq_workers (
@@ -1176,19 +1425,20 @@ WantedBy=multi-user.target
             ON workflow_runs (callback_result_id);
             """,
         ]
-        with connection.cursor() as cursor:
+        with conn.cursor() as cursor:
             for statement in statements:
                 cursor.execute(statement)
             for statement in ensure_pre_statements:
                 cursor.execute(statement)
-        self._backfill_task_path()
-        with connection.cursor() as cursor:
+        self._backfill_task_path(db_alias=db_alias)
+        with conn.cursor() as cursor:
             for statement in ensure_post_statements:
                 cursor.execute(statement)
         self.stdout.write(self.style.SUCCESS("✅ Reproq schema applied."))
 
     def run_worker_or_beat(self, cmd, options):
-        dsn = self.get_dsn()
+        db_alias = (options.get("database") or "").strip()
+        dsn = self.get_dsn(db_alias or None)
         worker_bin, resolved_bin, exists = self._resolve_worker_bin()
         if not exists:
             hint = (
@@ -1207,6 +1457,7 @@ WantedBy=multi-user.target
                     "--queues",
                     "--queue",
                     "--allowed-task-modules",
+                    "--database",
                     "--logs-dir",
                     "--payload-mode",
                     "--metrics-port",
@@ -1227,6 +1478,8 @@ WantedBy=multi-user.target
                 for flag in [
                     "--config",
                     "--interval",
+                    "--once",
+                    "--database",
                 ]
             )
 
@@ -1236,15 +1489,18 @@ WantedBy=multi-user.target
             raise CommandError(f"Config file not found: {config_path}")
 
         if not dsn and not use_config:
-            raise CommandError(
-                "DATABASE_URL not set. Reproq worker requires a Postgres DSN."
-            )
+            hint = "DATABASE_URL not set. Reproq worker requires a Postgres DSN."
+            if db_alias:
+                hint = f"DSN not set for database alias '{db_alias}'."
+            raise CommandError(hint)
 
         self.stdout.write(f"Worker binary: {resolved_bin or worker_bin}")
         if use_config:
             self.stdout.write(f"Config: {config_path}")
         else:
             self.stdout.write(f"DSN: {self._mask_dsn(dsn)}")
+            if db_alias:
+                self.stdout.write(f"Database alias: {db_alias}")
 
         args = [worker_bin, cmd]
         if use_config:
@@ -1339,8 +1595,12 @@ WantedBy=multi-user.target
             if use_config:
                 if self._flag_present("--interval"):
                     args.extend(["--interval", options["interval"]])
+                if options.get("once"):
+                    args.append("--once")
             else:
                 args.extend(["--interval", options["interval"]])
+                if options.get("once"):
+                    args.append("--once")
             
         self.stdout.write(f"Starting {cmd}...")
         try:
@@ -1352,7 +1612,9 @@ WantedBy=multi-user.target
 
     def run_pg_cron(self, options):
         if_supported = options.get("if_supported")
-        if connection.vendor != "postgresql":
+        db_alias = self._resolve_db_alias(options)
+        conn = connections[db_alias]
+        if conn.vendor != "postgresql":
             if if_supported:
                 self.stdout.write("pg-cron unavailable (non-Postgres database); skipping.")
                 return
@@ -1368,8 +1630,8 @@ WantedBy=multi-user.target
         prefix = (options.get("prefix") or "reproq_periodic").strip()
         dry_run = options.get("dry_run")
 
-        with connection.cursor() as cursor:
-            tables = set(connection.introspection.table_names(cursor))
+        with conn.cursor() as cursor:
+            tables = set(conn.introspection.table_names(cursor))
             if "periodic_tasks" not in tables:
                 raise CommandError("Missing periodic_tasks table. Run migrations first.")
             if not self._pg_cron_available(cursor):
@@ -1632,8 +1894,10 @@ WantedBy=multi-user.target
 
     def run_logs(self, options):
         result_id = options["id"]
+        db_alias = self._resolve_db_alias(options, result_id=result_id)
+        _, raw_id = parse_result_id(result_id)
         try:
-            run = TaskRun.objects.get(result_id=result_id)
+            run = TaskRun.objects.using(db_alias).get(result_id=raw_id)
         except TaskRun.DoesNotExist as exc:
             raise CommandError(f"Task run {result_id} not found.") from exc
 
@@ -1661,8 +1925,10 @@ WantedBy=multi-user.target
 
     def run_cancel(self, options):
         result_id = options["id"]
+        db_alias = self._resolve_db_alias(options, result_id=result_id)
+        _, raw_id = parse_result_id(result_id)
         try:
-            run = TaskRun.objects.get(result_id=result_id)
+            run = TaskRun.objects.using(db_alias).get(result_id=raw_id)
         except TaskRun.DoesNotExist as exc:
             raise CommandError(f"Task run {result_id} not found.") from exc
 
@@ -1680,22 +1946,33 @@ WantedBy=multi-user.target
                 )
             )
 
-    def run_stats(self):
+    def run_stats(self, options):
         from reproq_django.models import TaskRun, Worker
         from django.db.models import Count
 
+        aliases = self._resolve_db_aliases(options)
         self.stdout.write(self.style.MIGRATE_HEADING("📊 Reproq Statistics"))
-        
-        stats = TaskRun.objects.values("status").annotate(count=Count("result_id"))
-        self.stdout.write("\nTasks by Status:")
-        for s in stats:
-            color = self.style.SUCCESS if s["status"] == "SUCCESSFUL" else (self.style.ERROR if s["status"] == "FAILED" else self.style.WARNING)
-            self.stdout.write(f"  {s['status']:<12}: {color(str(s['count']))}")
 
-        workers = Worker.objects.all()
-        self.stdout.write(f"\nActive Workers: {len(workers)}")
-        for w in workers:
-            self.stdout.write(f"  - {w.worker_id} ({w.hostname}) | Queues: {w.queues} | Concurrency: {w.concurrency}")
+        totals = {}
+        for alias in aliases:
+            stats = TaskRun.objects.using(alias).values("status").annotate(count=Count("result_id"))
+            self.stdout.write(f"\nDatabase: {alias}")
+            self.stdout.write("Tasks by Status:")
+            for s in stats:
+                totals[s["status"]] = totals.get(s["status"], 0) + s["count"]
+                color = self.style.SUCCESS if s["status"] == "SUCCESSFUL" else (self.style.ERROR if s["status"] == "FAILED" else self.style.WARNING)
+                self.stdout.write(f"  {s['status']:<12}: {color(str(s['count']))}")
+
+            workers = list(Worker.objects.using(alias).all())
+            self.stdout.write(f"Active Workers: {len(workers)}")
+            for w in workers:
+                self.stdout.write(f"  - {w.worker_id} ({w.hostname}) | Queues: {w.queues} | Concurrency: {w.concurrency}")
+
+        if len(aliases) > 1:
+            self.stdout.write("\nAggregate Totals:")
+            for status, count in sorted(totals.items()):
+                color = self.style.SUCCESS if status == "SUCCESSFUL" else (self.style.ERROR if status == "FAILED" else self.style.WARNING)
+                self.stdout.write(f"  {status:<12}: {color(str(count))}")
 
     def run_stress_test(self, options):
         from reproq_django.tasks import debug_noop_task
@@ -1770,11 +2047,12 @@ WantedBy=multi-user.target
         candidate = os.path.join(pkg_dir, "bin", f"reproq{ext}")
         return candidate if os.path.exists(candidate) else "reproq"
 
-    def get_dsn(self):
+    def get_dsn(self, db_alias: str | None = None):
         env_dsn = os.environ.get("DATABASE_URL")
-        if env_dsn:
+        if env_dsn and not db_alias:
             return env_dsn
-        db_conf = settings.DATABASES.get("default", {})
+        alias = db_alias or "default"
+        db_conf = settings.DATABASES.get(alias, {})
         user = db_conf.get("USER")
         name = db_conf.get("NAME")
         if not user or not name:

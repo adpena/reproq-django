@@ -7,6 +7,7 @@ Reproq is designed for stability in production environments. Follow these guidel
 **Option A (Recommended): Separate worker + scheduler processes**
 - Run `python manage.py reproq worker` and either `python manage.py reproq beat` or `python manage.py reproq pg-cron --install`.
 - Use a supervisor (systemd, supervisor, or separate container/services) so they restart automatically.
+ - If you route queues to multiple databases, run one worker/beat per database alias (`--database`).
 
 **Option B: Single-service (web + worker + scheduler)**
 - Run the worker and beat in the same service as your web process (or use `pg-cron` and omit beat).
@@ -71,8 +72,16 @@ The Go worker needs access to your database. It respects the following:
 - `METRICS_TLS_CLIENT_CA`: Optional client CA bundle to require mTLS for health/metrics.
 - `ALLOWED_TASK_MODULES`: Optional allow-list for task module prefixes. If unset, `python manage.py reproq worker` auto-configures it from discovered task modules.
 - `REPROQ_LOGS_DIR`: Optional directory to persist worker stdout/stderr logs (updates `task_runs.logs_uri`).
+- `REPROQ_QUEUE_DATABASES`: Map queue names (or globs) to Django database aliases for multi-DB routing.
+- `REPROQ_DEFAULT_DB_ALIAS`: Override the default database alias for queues (defaults to `default`).
 
 If `DATABASE_URL` is not set, `python manage.py reproq worker` derives a DSN from `settings.DATABASES["default"]` using `USER`, `PASSWORD`, `HOST`, `PORT`, and `NAME`.
+
+If you want all Reproq tables to live in a non-default database alias, set
+`REPROQ_DEFAULT_DB_ALIAS` and add the router to Django settings:
+```python
+DATABASE_ROUTERS = ["reproq_django.db_router.ReproqRouter"]
+```
 
 Worker binary resolution order:
 1. `REPROQ_WORKER_BIN` (setting or env)
@@ -104,6 +113,7 @@ python manage.py reproq worker --concurrency 50
 ```
 
 Queue selection uses `--queues` (comma-separated). The legacy `--queue` flag remains for compatibility but is deprecated.
+Use `--database <alias>` when a worker should target a non-default queue database.
 
 ## 4. Periodic Tasks (Beat or pg_cron)
 
@@ -113,6 +123,14 @@ Queue selection uses `--queues` (comma-separated). The legacy `--queue` flag rem
 Start beat as a dedicated process (recommended when pg_cron is unavailable):
 ```bash
 python manage.py reproq beat --interval 30s
+```
+
+If you cannot run a persistent beat process (low-memory environments), schedule
+beat as a cron job:
+
+```bash
+* * * * * /path/to/venv/bin/python manage.py reproq beat --once
+* * * * * /path/to/venv/bin/python manage.py reproq schedule
 ```
 
 ### Option B: pg_cron

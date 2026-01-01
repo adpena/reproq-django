@@ -121,6 +121,8 @@ python manage.py migrate --noinput</pre>
                 <h4 class="font-bold mt-4">7. (Optional) Schedule Periodic Tasks</h4>
                 <p>Choose one scheduler: beat or pg_cron.</p>
                 <pre>python manage.py reproq beat
+python manage.py reproq beat --once
+python manage.py reproq schedule
 python manage.py reproq pg-cron --install</pre>
             </section>
 
@@ -130,8 +132,11 @@ python manage.py reproq pg-cron --install</pre>
                 <ul>
                     <li><strong>init</strong>: Write <code>reproq.yaml</code>/<code>reproq.toml</code>, install the worker, and run migrations.</li>
                     <li><strong>worker</strong>: Start the Go worker process.</li>
-                    <li><strong>beat</strong>: Start the periodic task scheduler (one per database).</li>
+                    <li><strong>beat</strong>: Start the periodic task scheduler (one per database). Use <code>--once</code> for cron.</li>
+                    <li><strong>schedule</strong>: Enqueue due periodic tasks once and exit (alias for <code>beat --once</code>).</li>
                     <li><strong>pg-cron</strong>: Sync Postgres-native schedules via <code>pg_cron</code>.</li>
+                    <li><strong>sync-recurring</strong>: Sync code-defined recurring schedules.</li>
+                    <li><strong>pause-queue / resume-queue</strong>: Pause or resume queue processing.</li>
                     <li><strong>migrate-worker</strong>: Apply worker indexes and schema helpers.</li>
                     <li><strong>doctor</strong>: Validate DSN, schema, worker binary, and allowlist health.</li>
                     <li><strong>config --explain</strong>: Print the effective config with precedence.</li>
@@ -166,6 +171,9 @@ def process_invoice(invoice_id):
 
 # This ensures only one invoice_123 task runs at a time
 process_invoice.enqueue(123, lock_key="invoice_123")</pre>
+                <p>To allow limited parallelism, use <code>concurrency_key</code> + <code>concurrency_limit</code>.</p>
+                <pre># Allow up to 2 tasks with the same key
+process_invoice.enqueue(123, concurrency_key="invoice_123", concurrency_limit=2)</pre>
             </section>
 
             <section id="workflows" class="mb-16 prose prose-slate max-w-none">
@@ -199,7 +207,7 @@ chain(task_a, task_b, task_c).enqueue()</pre>
         "OPTIONS": { "DEDUP_ACTIVE": True }
     }
 }</pre>
-                <p class="text-sm text-slate-600">The spec hash includes scheduling metadata such as <code>priority</code>, <code>run_after</code>, and <code>lock_key</code>, so changes to those fields intentionally bypass deduplication.</p>
+                <p class="text-sm text-slate-600">The spec hash includes scheduling metadata such as <code>priority</code>, <code>run_after</code>, <code>lock_key</code>, and concurrency controls, so changes to those fields intentionally bypass deduplication.</p>
                 <p>To force a unique run, include a unique identifier in the task arguments.</p>
                 <pre>import uuid
 

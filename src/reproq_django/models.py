@@ -31,6 +31,8 @@ class TaskRun(models.Model):
     timeout_seconds = models.IntegerField(default=900)
     
     lock_key = models.TextField(null=True, blank=True)
+    concurrency_key = models.TextField(null=True, blank=True)
+    concurrency_limit = models.IntegerField(default=0)
     parent = models.ForeignKey('self', on_delete=models.SET_NULL, null=True, blank=True, related_name='children')
     workflow_id = models.UUIDField(null=True, blank=True)
     wait_count = models.IntegerField(default=0)
@@ -40,6 +42,7 @@ class TaskRun(models.Model):
 
     return_json = models.JSONField(null=True, blank=True)
     errors_json = models.JSONField(default=list, blank=True)
+    metadata_json = models.JSONField(default=dict, blank=True)
     last_error = models.TextField(null=True, blank=True)
     failed_at = models.DateTimeField(null=True, blank=True)
 
@@ -65,6 +68,7 @@ class TaskRun(models.Model):
         indexes = [
             models.Index(fields=["status"]),
             models.Index(fields=["queue_name", "status"]),
+            models.Index(fields=["concurrency_key", "status"], name="task_runs_concurrency_key_status_idx"),
         ]
 
     def __str__(self):
@@ -95,6 +99,8 @@ class PeriodicTask(models.Model):
     queue_name = models.TextField(default="default")
     priority = models.IntegerField(default=0)
     max_attempts = models.IntegerField(default=3)
+    concurrency_key = models.TextField(null=True, blank=True)
+    concurrency_limit = models.IntegerField(default=0)
     last_run_at = models.DateTimeField(null=True, blank=True)
     next_run_at = models.DateTimeField()
     enabled = models.BooleanField(default=True)
@@ -108,6 +114,22 @@ class PeriodicTask(models.Model):
 
     def __str__(self):
         return f"{self.name} ({self.cron_expr})"
+
+class QueueControl(models.Model):
+    queue_name = models.TextField(primary_key=True)
+    paused = models.BooleanField(default=False)
+    paused_at = models.DateTimeField(null=True, blank=True)
+    reason = models.TextField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "reproq_queue_controls"
+        verbose_name = "Queue Control"
+        verbose_name_plural = "Queue Controls"
+
+    def __str__(self):
+        return self.queue_name
 
 class WorkflowRun(models.Model):
     workflow_id = models.UUIDField(primary_key=True)

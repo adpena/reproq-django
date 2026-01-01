@@ -64,6 +64,11 @@ def execute():
     setup_django(args.settings or spec.get("django", {}).get("settings_module"))
 
     from django.utils.module_loading import import_string
+    from reproq_django.context import TaskContext
+    from reproq_django.db import resolve_queue_db
+    from reproq_django.models import TaskRun
+    from reproq_django.serialization import decode_args_kwargs, DeserializationError
+    from reproq_django.signals import task_finished, task_started
     
     task_path = args.task_path or spec.get("task_path")
     try:
@@ -86,15 +91,29 @@ def execute():
     else:
         real_callable = callable_task
 
-    # Context for task
-    context = {
-        "result_id": args.result_id,
-        "attempt": args.attempt,
-        "spec_hash": None, # Could be passed in CLI if needed
-        "task_path": task_path,
-        "queue_name": spec.get("queue_name"),
-        "priority": spec.get("priority"),
-    }
+    queue_name = spec.get("queue_name")
+    db_alias = resolve_queue_db(queue_name)
+    try:
+        existing_metadata = TaskRun.objects.using(db_alias).values_list(
+            "metadata_json", flat=True
+        ).get(result_id=args.result_id)
+        if existing_metadata is None:
+            existing_metadata = {}
+    except TaskRun.DoesNotExist:
+        existing_metadata = {}
+    except Exception as exc:
+        debug_log(f"Failed to load metadata: {exc}")
+        existing_metadata = {}
+
+    context = TaskContext(
+        result_id=args.result_id,
+        attempt=args.attempt,
+        task_path=task_path,
+        queue_name=queue_name,
+        priority=spec.get("priority"),
+        db_alias=db_alias,
+        metadata=existing_metadata,
+    )
 
     # Signal handling
     def signal_handler(sig, frame):
@@ -111,16 +130,28 @@ def execute():
     signal.signal(signal.SIGTERM, signal_handler)
     signal.signal(signal.SIGINT, signal_handler)
 
+    def _emit_signal(signal_obj, **payload):
+        try:
+            signal_obj.send(sender="reproq_django.executor", **payload)
+        except Exception as exc:
+            debug_log(f"Signal failed: {exc}")
+
     try:
-        task_args = spec.get("args", [])
-        task_kwargs = spec.get("kwargs", {})
+        raw_args = spec.get("args", [])
+        raw_kwargs = spec.get("kwargs", {})
+        try:
+            task_args, task_kwargs = decode_args_kwargs(raw_args, raw_kwargs, using=db_alias)
+        except DeserializationError as exc:
+            raise RuntimeError(f"Failed to deserialize arguments: {exc}") from exc
         debug_log(f"Executing task {task_path} (result_id={args.result_id}, attempt={args.attempt})")
 
         stdout_capture = io.StringIO()
         with contextlib.redirect_stdout(stdout_capture):
             if spec.get("takes_context") or getattr(callable_task, "takes_context", False):
+                _emit_signal(task_started, task_context=context)
                 result_val = real_callable(context, *task_args, **task_kwargs)
             else:
+                _emit_signal(task_started, task_context=context)
                 result_val = real_callable(*task_args, **task_kwargs)
 
             # Support for async tasks
@@ -141,10 +172,21 @@ def execute():
         except TypeError:
             raise TypeError(f"Return value of type {type(result_val)} is not JSON serializable")
 
+        try:
+            context.save_metadata()
+        except Exception as exc:
+            debug_log(f"Failed to save metadata: {exc}")
+
+        _emit_signal(task_finished, task_context=context, ok=True)
         emit_result({"ok": True, "return": result_val})
 
     except Exception as e:
         debug_log(f"Task execution failed: {e}")
+        try:
+            context.save_metadata()
+        except Exception as exc:
+            debug_log(f"Failed to save metadata: {exc}")
+        _emit_signal(task_finished, task_context=context, ok=False, error=str(e))
         emit_result(
             {
                 "ok": False,

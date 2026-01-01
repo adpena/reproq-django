@@ -11,6 +11,7 @@ When you enqueue a task, Reproq generates a SHA256 hash of the "specification":
 - Queue name
 - Priority
 - Lock key (if provided)
+- Concurrency key/limit (if provided)
 - Run-after timestamp
 - Execution settings (timeout, max attempts)
 - Provenance metadata (when configured)
@@ -64,9 +65,10 @@ You can also bypass deduplication by changing the scheduling metadata:
 ```python
 from datetime import timedelta
 
-# run_after and lock_key change the spec hash
+# run_after, lock_key, and concurrency controls change the spec hash
 send_welcome_email.using(run_after=timedelta(minutes=5)).enqueue(123)
 send_welcome_email.enqueue(123, lock_key="user:123")
+send_welcome_email.enqueue(123, concurrency_key="user:123", concurrency_limit=2)
 ```
 
 ## Inspecting a Spec Hash

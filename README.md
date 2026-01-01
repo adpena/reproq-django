@@ -162,6 +162,17 @@ def send_welcome_email(user_id):
     return f"Email sent to {user_id}"
 ```
 
+You can also annotate a task with a concurrency limit:
+
+```python
+from reproq_django.concurrency import limits_concurrency
+
+@limits_concurrency(lambda user_id: f"user:{user_id}", to=1)
+@task(queue_name="high-priority", priority=100)
+def send_welcome_email(user_id):
+    return f"Email sent to {user_id}"
+```
+
 ### Enqueuing Tasks
 Use `.enqueue()` to dispatch tasks. Reproq supports additional arguments via `kwargs`.
 
@@ -176,14 +187,24 @@ result = send_welcome_email.using(run_after=timedelta(minutes=10)).enqueue(123)
 # Concurrency Control (lock_key)
 # Ensure only one task with this key runs at a time
 result = send_welcome_email.enqueue(123, lock_key=f"user_123_sync")
+
+# Concurrency Control (limit per key)
+# Allow up to N concurrent tasks sharing a key
+result = send_welcome_email.enqueue(
+    123,
+    concurrency_key="user:123",
+    concurrency_limit=2,
+)
 ```
 
 **Supported `enqueue` kwargs (Reproq extensions):**
 - `run_after`: `datetime` or `timedelta`. Delays execution.
 - `lock_key`: `str`. Prevents multiple tasks with the same key from being in `RUNNING` state simultaneously.
 - `priority`: `int`. Overrides the task's default priority for this enqueue only.
+- `concurrency_key`: `str` or callable. Limits concurrent tasks sharing the key.
+- `concurrency_limit`: `int`. Maximum concurrent tasks for the key (0 disables).
 
-**Reserved kwargs:** `run_after`, `lock_key`, and `priority` are treated as scheduling metadata and are removed from task kwargs. If your task needs parameters with these names, rename them.
+**Reserved kwargs:** `run_after`, `lock_key`, `priority`, `concurrency_key`, and `concurrency_limit` are treated as scheduling metadata and are removed from task kwargs. If your task needs parameters with these names, rename them.
 
 **Note on Priority:** Task priority is set at definition time via `@task(priority=...)` and can be overridden per call via `enqueue(priority=...)`.
 
@@ -195,6 +216,23 @@ result = await send_welcome_email.aenqueue(123)
 ```
 
 In sync/Wsgi code, continue to use `enqueue()`.
+
+### Task Context + Metadata
+If your task needs context (result id, attempt, metadata), use `takes_context=True`.
+
+```python
+from django.tasks import task
+
+@task(takes_context=True)
+def process_upload(context, upload_id):
+    context.metadata["stage"] = "starting"
+    context.save_metadata()
+    # work...
+    context.metadata["stage"] = "done"
+    context.save_metadata()
+```
+
+Metadata is stored in `task_runs.metadata_json` and surfaced in task results.
 
 ### Bulk Enqueuing
 For high-throughput scenarios, use `bulk_enqueue` to insert thousands of tasks in a single query.
@@ -230,6 +268,14 @@ scheduler per database:
 If you choose pg_cron, run `reproq pg-cron --install` after every deploy or
 migration to keep schedules in sync. On managed platforms, prefer
 `--if-supported` so deploys do not fail if pg_cron is unavailable.
+
+If you cannot run a long-lived beat process (low-memory environments), run beat
+as a one-shot command from crontab every minute:
+
+```bash
+* * * * * /path/to/venv/bin/python manage.py reproq beat --once
+* * * * * /path/to/venv/bin/python manage.py reproq schedule
+```
 
 ### Create a Schedule (Admin or ORM)
 You can manage schedules in the Django Admin under "Reproq Django" or via code.
@@ -306,6 +352,28 @@ nightly_cleanup.enqueue()
 - `queue_name` is optional; when set, the worker must listen on that queue.
 - Ensure the task module is allowlisted when `ALLOWED_TASK_MODULES` is used.
 
+### Recurring Tasks in Code
+Use the `@recurring` decorator to keep periodic schedules in source control.
+
+```python
+from django.tasks import task
+from reproq_django.recurring import recurring
+
+@recurring(schedule="0 9 * * *", key="daily_report", args=(42,))
+@task(queue_name="maintenance")
+def send_report(account_id):
+    ...
+```
+
+Sync code-defined schedules with:
+
+```bash
+python manage.py reproq sync-recurring
+```
+
+By default, recurring tasks auto-sync on `post_migrate`. Set
+`REPROQ_RECURRING_AUTOSYNC=False` to disable.
+
 ---
 
 ## ⚙️ Configuration
@@ -346,6 +414,40 @@ TASKS = {
 Worker config files (`reproq.yaml`/`reproq.toml`) are optional. Precedence is:
 defaults < config file < env vars < CLI flags. `--dsn` overrides `DATABASE_URL`, and
 `DATABASE_URL` is optional when flags or a config file are provided.
+
+### Multi-Database Queues
+Route specific queues to different Django database aliases.
+
+```python
+DATABASES = {
+    "default": {...},
+    "queues": {...},
+}
+
+REPROQ_QUEUE_DATABASES = {
+    "high-priority": "queues",
+    "bulk-*": "queues",  # glob patterns supported
+}
+```
+
+Use `REPROQ_DEFAULT_DB_ALIAS` to change the fallback alias (defaults to
+`"default"`). When multiple queue databases are configured, task result IDs are
+prefixed with the database alias (`queues:123`). Set
+`REPROQ_RESULT_ID_WITH_ALIAS=False` to force legacy IDs.
+To route all Reproq tables to a non-default alias in ORM reads/writes (admin,
+health checks, etc.), add the router:
+```python
+DATABASE_ROUTERS = ["reproq_django.db_router.ReproqRouter"]
+```
+
+Run one worker/beat per database:
+
+```bash
+python manage.py reproq worker --database queues --queues high-priority,bulk-1
+python manage.py reproq beat --database queues
+```
+
+Use `REPROQ_STATS_DATABASES=["*"]` to aggregate stats across all queue databases.
 
 ---
 
@@ -461,9 +563,10 @@ The `python manage.py reproq` command is your Swiss Army knife.
 | Subcommand | Description |
 | :--- | :--- |
 | `init` | Bootstraps Reproq in the current project. |
-| `worker` | Starts the Go worker. Flags: `--config`, `--concurrency` (default 10), `--queues`, `--allowed-task-modules`, `--logs-dir`, `--payload-mode`, `--metrics-port`, `--metrics-addr`, `--metrics-auth-token`, `--metrics-allow-cidrs`, `--metrics-tls-cert`, `--metrics-tls-key`, `--metrics-tls-client-ca`. Auto-configures allow-list when unset (unless config file is used). |
-| `beat` | Starts the scheduler. Flags: `--config`, `--interval` (default 30s). |
-| `pg-cron` | Syncs Postgres-native schedules. Flags: `--install` (default), `--remove`, `--prefix`, `--dry-run`. |
+| `worker` | Starts the Go worker. Flags: `--config`, `--concurrency` (default 10), `--queues`, `--allowed-task-modules`, `--logs-dir`, `--payload-mode`, `--metrics-port`, `--metrics-addr`, `--metrics-auth-token`, `--metrics-allow-cidrs`, `--metrics-tls-cert`, `--metrics-tls-key`, `--metrics-tls-client-ca`, `--database`. Auto-configures allow-list when unset (unless config file is used). |
+| `beat` | Starts the scheduler. Flags: `--config`, `--interval` (default 30s), `--once`, `--database`. |
+| `schedule` | Enqueue due periodic tasks once and exit (alias for `beat --once`). |
+| `pg-cron` | Syncs Postgres-native schedules. Flags: `--install` (default), `--remove`, `--prefix`, `--dry-run`, `--database`. |
 | `install` | Downloads/builds the worker binary. |
 | `upgrade` | Upgrades the worker binary and optionally runs `migrate-worker`. |
 | `migrate-worker` | Applies essential SQL schema optimizations (indexes, extensions). |
@@ -471,12 +574,16 @@ The `python manage.py reproq` command is your Swiss Army knife.
 | `doctor` | Validates DSN, schema, worker binary, and allowlist; `--strict` fails on warnings. |
 | `config` | Prints effective worker/beat config; use `--explain` for precedence. |
 | `allowlist` | Prints `ALLOWED_TASK_MODULES` or writes them to a config file with `--write`. |
-| `logs` | Prints logs for a task run using `logs_uri`. |
-| `cancel` | Requests cancellation of a task run by result ID. |
-| `reclaim` | Requeue or fail tasks with expired leases. |
-| `prune-workers` | Delete workers not seen recently. |
-| `prune-successful` | Delete successful task runs older than a cutoff. |
-| `stats` / `status` | Shows task counts by status and active workers. |
+| `sync-recurring` | Sync code-defined recurring schedules into `periodic_tasks`. |
+| `pause-queue` | Pause a queue (prevents new claims). |
+| `resume-queue` | Resume a paused queue. |
+| `logs` | Prints logs for a task run using `logs_uri` (supports aliased result IDs). |
+| `cancel` | Requests cancellation of a task run by result ID (supports aliased result IDs). |
+| `reclaim` | Requeue or fail tasks with expired leases (`--database` / `--all-databases`). |
+| `prune-workers` | Delete workers not seen recently (`--database` / `--all-databases`). |
+| `prune-successful` | Delete successful task runs older than a cutoff (`--database` / `--all-databases`). |
+| `prune` | Delete task runs by status/age (`--database` / `--all-databases`). |
+| `stats` / `status` | Shows task counts by status and active workers (`--database` / `--all-databases`). |
 | `systemd` | Generates systemd service files for production. |
 | `stress-test` | Enqueues dummy tasks for benchmarking. |
 
@@ -488,6 +595,8 @@ When you include `reproq_django.urls` in your project, `GET /stats/` returns
 JSON task counts, per-queue task counts, worker records, and periodic task
 schedules. Access is granted to staff sessions, a signed TUI JWT, or
 `METRICS_AUTH_TOKEN` as a bearer token.
+Additional fields include `worker_health`, `queue_controls`, `scheduler`, and
+per-database rollups when `REPROQ_STATS_DATABASES` is set.
 
 ## 🧭 TUI Integration
 

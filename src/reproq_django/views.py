@@ -10,9 +10,12 @@ from django.conf import settings
 from django.db import connection
 from django.db.models import Count
 from django.http import HttpResponse, JsonResponse, StreamingHttpResponse
+from django.utils import timezone
+from datetime import timedelta
 from django.views.decorators.http import require_GET
 
-from .models import TaskRun, Worker, PeriodicTask
+from .models import TaskRun, Worker, PeriodicTask, QueueControl
+from .db import default_db_alias, queue_db_aliases
 from .tui_auth import (
     get_tui_internal_endpoints,
     tui_events_enabled,
@@ -48,6 +51,21 @@ def _authorized(request):
 
 def _truthy(value):
     return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _stats_db_aliases():
+    override = getattr(settings, "REPROQ_STATS_DATABASES", None)
+    if override:
+        if isinstance(override, str):
+            override = [override]
+        aliases = []
+        for alias in override:
+            if alias == "*":
+                aliases.extend(queue_db_aliases())
+            else:
+                aliases.append(alias)
+        return sorted(set(aliases))
+    return [default_db_alias()]
 
 
 def _beat_configured():
@@ -149,26 +167,93 @@ def reproq_stats_api(request):
     if not _authorized(request):
         return JsonResponse({"error": "Unauthorized"}, status=403)
 
-    task_stats = TaskRun.objects.values("status").annotate(count=Count("result_id"))
-    queue_stats = TaskRun.objects.values("queue_name", "status").annotate(count=Count("result_id"))
-    worker_stats = Worker.objects.all().values("worker_id", "hostname", "concurrency", "queues", "last_seen_at", "version")
-    periodic_stats = PeriodicTask.objects.all().values("name", "cron_expr", "enabled", "next_run_at")
+    aliases = _stats_db_aliases()
+    tasks_totals = {}
+    queues_totals = {}
+    workers = []
+    periodic = []
+    queue_controls = []
+    top_failing_counts = {}
+    databases = []
 
-    top_failing = TaskRun.objects.filter(status="FAILED").values("task_path").annotate(count=Count("result_id")).order_by("-count")[:5]
+    for alias in aliases:
+        task_stats = TaskRun.objects.using(alias).values("status").annotate(count=Count("result_id"))
+        queue_stats = TaskRun.objects.using(alias).values("queue_name", "status").annotate(count=Count("result_id"))
+        worker_stats = Worker.objects.using(alias).all().values(
+            "worker_id", "hostname", "concurrency", "queues", "last_seen_at", "version"
+        )
+        periodic_stats = PeriodicTask.objects.using(alias).all().values(
+            "name", "cron_expr", "enabled", "next_run_at", "queue_name"
+        )
+        controls = QueueControl.objects.using(alias).all().values(
+            "queue_name", "paused", "paused_at", "reason", "updated_at"
+        )
+        top_failing = (
+            TaskRun.objects.using(alias)
+            .filter(status="FAILED")
+            .values("task_path")
+            .annotate(count=Count("result_id"))
+            .order_by("-count")[:5]
+        )
 
-    queues = {}
-    for row in queue_stats:
-        queue = row["queue_name"] or "default"
-        status = row["status"]
-        queues.setdefault(queue, {})[status] = row["count"]
+        for row in task_stats:
+            tasks_totals[row["status"]] = tasks_totals.get(row["status"], 0) + row["count"]
+
+        per_queue = {}
+        for row in queue_stats:
+            queue = row["queue_name"] or "default"
+            status = row["status"]
+            queues_totals.setdefault(queue, {})[status] = queues_totals.get(queue, {}).get(status, 0) + row["count"]
+            per_queue.setdefault(queue, {})[status] = row["count"]
+
+        for row in worker_stats:
+            payload = dict(row)
+            payload["database"] = alias
+            workers.append(payload)
+
+        for row in periodic_stats:
+            payload = dict(row)
+            payload["database"] = alias
+            periodic.append(payload)
+
+        for row in controls:
+            payload = dict(row)
+            payload["database"] = alias
+            queue_controls.append(payload)
+
+        for row in top_failing:
+            task_path = row["task_path"] or ""
+            top_failing_counts[task_path] = top_failing_counts.get(task_path, 0) + row["count"]
+
+        databases.append(
+            {
+                "alias": alias,
+                "tasks": {row["status"]: row["count"] for row in task_stats},
+                "queues": per_queue,
+                "workers": list(worker_stats),
+                "periodic": list(periodic_stats),
+            }
+        )
+
+    alive_cutoff = timezone.now() - timedelta(minutes=2)
+    alive = sum(1 for worker in workers if worker.get("last_seen_at") and worker["last_seen_at"] > alive_cutoff)
+    dead = len(workers) - alive
+
+    top_failing_list = [
+        {"task_path": key, "count": value}
+        for key, value in sorted(top_failing_counts.items(), key=lambda item: item[1], reverse=True)[:5]
+    ]
 
     return JsonResponse({
-        "tasks": {s["status"]: s["count"] for s in task_stats},
-        "queues": queues,
-        "workers": list(worker_stats),
-        "periodic": list(periodic_stats),
+        "tasks": tasks_totals,
+        "queues": queues_totals,
+        "workers": workers,
+        "periodic": periodic,
+        "queue_controls": queue_controls,
+        "worker_health": {"alive": alive, "dead": dead},
         "scheduler": _scheduler_status(),
-        "top_failing": list(top_failing),
+        "top_failing": top_failing_list,
+        "databases": databases,
     })
 
 def reproq_stress_test_api(request):
