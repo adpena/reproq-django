@@ -670,6 +670,15 @@ python manage.py reproq systemd --user myuser --concurrency 20
 This generates `reproq-worker.service` and `reproq-beat.service`. Copy them to `/etc/systemd/system/` and enable them.
 You can pass metrics flags (for example `--metrics-addr 127.0.0.1:9090`) or use `--env-file` to load `METRICS_AUTH_TOKEN` and `METRICS_ALLOW_CIDRS`.
 
+To use cron-style scheduling instead of a persistent beat process, generate a timer:
+
+```bash
+python manage.py reproq systemd --schedule --schedule-on-calendar "*-*-* *:*:00"
+```
+
+Set `REPROQ_SCHEDULER_MODE=cron` in your EnvironmentFile and enable the timer to ensure
+only one scheduler runs.
+
 ### Env Vars
 The Go worker relies on standard environment variables:
 - `DATABASE_URL`: `postgres://user:pass@host:5432/db` (optional if you provide `--dsn` or a config file)

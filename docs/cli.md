@@ -243,10 +243,14 @@ python manage.py reproq resume-queue --queue maintenance
 ```
 
 ## systemd
-Generate systemd service files for worker and beat.
+Generate systemd service files for worker and beat. Use `--schedule` to emit a
+cron-style schedule timer/service and set `REPROQ_SCHEDULER_MODE=cron` in your
+environment file to activate it.
 
 ```bash
 python manage.py reproq systemd --user myuser --concurrency 20
+# Or generate a schedule timer (default: every minute)
+python manage.py reproq systemd --schedule --schedule-on-calendar "*-*-* *:*:00"
 ```
 
 ## stress-test

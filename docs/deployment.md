@@ -133,6 +133,20 @@ beat as a cron job:
 * * * * * /path/to/venv/bin/python manage.py reproq schedule
 ```
 
+You can also generate a systemd timer to run `reproq schedule` every minute:
+
+```bash
+python manage.py reproq systemd --schedule --schedule-on-calendar "*-*-* *:*:00"
+```
+
+Enable the timer, and set `REPROQ_SCHEDULER_MODE=cron` in your EnvironmentFile
+to ensure only the cron-style scheduler runs:
+
+```bash
+sudo cp reproq-schedule-<project>.service reproq-schedule-<project>.timer /etc/systemd/system/
+sudo systemctl enable --now reproq-schedule-<project>.timer
+```
+
 ### Option B: pg_cron
 If your database supports `pg_cron`, install schedules with:
 ```bash

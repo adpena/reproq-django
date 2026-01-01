@@ -236,6 +236,17 @@ class Command(BaseCommand):
         systemd_parser.add_argument("--metrics-auth-window", type=str, default="", help="Rate limit window (e.g. 1m)")
         systemd_parser.add_argument("--metrics-auth-max-entries", type=int, default=None, help="Max tracked hosts for auth rate limiting")
         systemd_parser.add_argument("--env-file", type=str, default="", help="Optional EnvironmentFile path")
+        systemd_parser.add_argument(
+            "--schedule",
+            action="store_true",
+            help="Generate a systemd timer/service for cron-style scheduling",
+        )
+        systemd_parser.add_argument(
+            "--schedule-on-calendar",
+            type=str,
+            default="*-*-* *:*:00",
+            help="systemd OnCalendar expression for schedule timer",
+        )
 
         # Reclaim
         reclaim_parser = subparsers.add_parser(
@@ -827,10 +838,34 @@ class Command(BaseCommand):
         if options.get("metrics_tls_client_ca"):
             worker_args.extend(["--metrics-tls-client-ca", options["metrics_tls_client_ca"]])
         beat_args = [python_bin, manage_py, "reproq", "beat"]
+        schedule_args = [python_bin, manage_py, "reproq", "schedule"]
+
+        def wrap_scheduler_guard(cmd: str, mode: str, default_mode: str | None) -> str:
+            if default_mode is None:
+                env_expr = "${REPROQ_SCHEDULER_MODE:-}"
+            else:
+                env_expr = f"${{REPROQ_SCHEDULER_MODE:-{default_mode}}}"
+            guarded = (
+                f'if [ "{env_expr}" = "{mode}" ]; then {cmd}; '
+                f'else echo "REPROQ_SCHEDULER_MODE=${{REPROQ_SCHEDULER_MODE}}; skipping reproq {mode}."; fi'
+            )
+            return f"/bin/bash -lc '{guarded}'"
 
         services = {
-            "worker": " ".join(shlex.quote(str(arg)) for arg in worker_args),
-            "beat": " ".join(shlex.quote(str(arg)) for arg in beat_args),
+            "worker": {
+                "cmd": " ".join(shlex.quote(str(arg)) for arg in worker_args),
+                "type": "simple",
+                "restart": True,
+            },
+            "beat": {
+                "cmd": wrap_scheduler_guard(
+                    " ".join(shlex.quote(str(arg)) for arg in beat_args),
+                    "beat",
+                    "beat",
+                ),
+                "type": "simple",
+                "restart": True,
+            },
         }
 
         env_lines = []
@@ -845,19 +880,21 @@ class Command(BaseCommand):
         if env_lines:
             env_block = "\n".join(env_lines) + "\n"
 
-        for name, cmd in services.items():
+        for name, service in services.items():
+            cmd = service["cmd"]
+            service_type = service["type"]
+            restart_line = "Restart=always\nRestartSec=5\n" if service["restart"] else ""
             content = f"""[Unit]
 Description=Reproq {name.capitalize()} - {project_name}
 After=network.target postgresql.service
 
 [Service]
-Type=simple
+Type={service_type}
 User={user}
 Group={group}
 WorkingDirectory={cwd}
 {env_block}ExecStart={cmd}
-Restart=always
-RestartSec=5
+{restart_line}
 
 [Install]
 WantedBy=multi-user.target
@@ -866,6 +903,47 @@ WantedBy=multi-user.target
             with open(service_name, "w") as f:
                 f.write(content)
             self.stdout.write(f"Generated {service_name}")
+
+        if options.get("schedule"):
+            schedule_cmd = wrap_scheduler_guard(
+                " ".join(shlex.quote(str(arg)) for arg in schedule_args),
+                "cron",
+                None,
+            )
+            schedule_service = f"""[Unit]
+Description=Reproq Schedule - {project_name}
+After=network.target postgresql.service
+
+[Service]
+Type=oneshot
+User={user}
+Group={group}
+WorkingDirectory={cwd}
+{env_block}ExecStart={schedule_cmd}
+
+[Install]
+WantedBy=multi-user.target
+"""
+            schedule_service_name = f"reproq-schedule-{project_name}.service"
+            with open(schedule_service_name, "w") as f:
+                f.write(schedule_service)
+            self.stdout.write(f"Generated {schedule_service_name}")
+
+            schedule_on_calendar = options.get("schedule_on_calendar") or "*-*-* *:*:00"
+            schedule_timer = f"""[Unit]
+Description=Reproq Schedule Timer - {project_name}
+
+[Timer]
+OnCalendar={schedule_on_calendar}
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+"""
+            schedule_timer_name = f"reproq-schedule-{project_name}.timer"
+            with open(schedule_timer_name, "w") as f:
+                f.write(schedule_timer)
+            self.stdout.write(f"Generated {schedule_timer_name}")
 
     def _parse_duration(self, value: str) -> timedelta:
         if not value:
