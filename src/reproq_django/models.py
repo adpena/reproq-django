@@ -68,7 +68,7 @@ class TaskRun(models.Model):
         indexes = [
             models.Index(fields=["status"]),
             models.Index(fields=["queue_name", "status"]),
-            models.Index(fields=["concurrency_key", "status"], name="task_runs_concurrency_key_status_idx"),
+            models.Index(fields=["concurrency_key", "status"], name="task_runs_conc_status_idx"),
         ]
 
     def __str__(self):

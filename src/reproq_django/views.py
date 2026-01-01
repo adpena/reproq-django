@@ -69,6 +69,9 @@ def _stats_db_aliases():
 
 
 def _beat_configured():
+    scheduler_mode = os.environ.get("REPROQ_SCHEDULER_MODE", "").strip().lower()
+    if scheduler_mode and scheduler_mode != "beat":
+        return False
     if "REPROQ_BEAT_CMD" not in os.environ:
         return True
     normalized = os.environ.get("REPROQ_BEAT_CMD", "").strip().lower()
