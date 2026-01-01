@@ -71,10 +71,12 @@ def _read_ru_maxrss_bytes():
 
 def _log_memory_usage(interval_seconds):
     pid = os.getpid()
+    role = os.environ.get("REPROQ_PROCESS_ROLE", "").strip() or "unknown"
     rss_bytes = _read_proc_rss_bytes()
     ru_maxrss_bytes = _read_ru_maxrss_bytes()
     logger.info(
-        "reproq_memory_usage pid=%s rss_bytes=%s ru_maxrss_bytes=%s threads=%s interval_s=%s",
+        "reproq_memory_usage role=%s pid=%s rss_bytes=%s ru_maxrss_bytes=%s threads=%s interval_s=%s",
+        role,
         pid,
         rss_bytes,
         ru_maxrss_bytes,

@@ -110,21 +110,21 @@ run_with_restart() {
 }
 
 if [[ -n "$worker_cmd" ]]; then
-  run_with_restart "reproq-worker" "$worker_cmd" &
+  run_with_restart "reproq-worker" "REPROQ_PROCESS_ROLE=worker ${worker_cmd}" &
   child_pids+=("$!")
 else
   log "reproq-worker disabled (empty REPROQ_WORKER_CMD)"
 fi
 
 if [[ -n "$beat_cmd" ]]; then
-  run_with_restart "reproq-beat" "$beat_cmd" &
+  run_with_restart "reproq-beat" "REPROQ_PROCESS_ROLE=beat ${beat_cmd}" &
   child_pids+=("$!")
 else
   log "reproq-beat disabled (empty REPROQ_BEAT_CMD)"
 fi
 
 log "web starting"
-bash -lc "$web_cmd" &
+bash -lc "REPROQ_PROCESS_ROLE=web ${web_cmd}" &
 web_pid=$!
 child_pids+=("$web_pid")
 
