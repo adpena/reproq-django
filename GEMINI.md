@@ -24,6 +24,8 @@ Run exactly one beat process per database.
 Use `python manage.py reproq beat --once` for cron-driven, low-memory scheduling.
 Code-defined schedules can be registered with `reproq_django.recurring.recurring` and
 synced via `python manage.py reproq sync-recurring`.
+`PeriodicTask.payload_json` uses `{"args": [...], "kwargs": {...}}` with the same encoding
+as task enqueues (models/timedeltas are supported).
 
 Example:
 ```python

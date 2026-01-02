@@ -350,6 +350,8 @@ nightly_cleanup.enqueue()
 - `cron_expr` uses standard 5-field cron syntax: `min hour day month weekday`.
 - `task_path` must be the full Python import path for the task.
 - `queue_name` is optional; when set, the worker must listen on that queue.
+- `payload_json` should use the `{"args": [...], "kwargs": {...}}` envelope, with values
+  encoded the same way as task enqueues (e.g., timedeltas/models are supported).
 - Ensure the task module is allowlisted when `ALLOWED_TASK_MODULES` is used.
 
 ### Recurring Tasks in Code

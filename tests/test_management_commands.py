@@ -155,6 +155,23 @@ class TestManagementCommands(unittest.TestCase):
     def test_pg_cron_if_supported_skips_non_postgres(self):
         call_command("reproq", "pg-cron", "--if-supported")
 
+    def test_pg_cron_function_spec_fields(self):
+        sql = Command()._pg_cron_function_sql()
+        expected = [
+            "'task_path'",
+            "'args'",
+            "'kwargs'",
+            "'queue_name'",
+            "'priority'",
+            "'concurrency_key'",
+            "'concurrency_limit'",
+            "'periodic_name'",
+            "'scheduled_at'",
+            "'exec'",
+        ]
+        for needle in expected:
+            self.assertIn(needle, sql)
+
 
 if __name__ == "__main__":
     unittest.main()

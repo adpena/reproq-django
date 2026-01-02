@@ -1770,15 +1770,17 @@ WantedBy=timers.target
             return
         cursor.execute("DROP FUNCTION IF EXISTS reproq_enqueue_periodic_task(TEXT);")
 
-    def _ensure_pg_cron_function(self, cursor, dry_run):
-        sql = """
+    def _pg_cron_function_sql(self):
+        return """
             CREATE OR REPLACE FUNCTION reproq_enqueue_periodic_task(task_name TEXT)
             RETURNS VOID
             LANGUAGE plpgsql
             AS $$
             DECLARE
                 task_row periodic_tasks%ROWTYPE;
+                payload_json JSONB;
                 args_json JSONB;
+                kwargs_json JSONB;
                 spec JSONB;
                 spec_hash TEXT;
             BEGIN
@@ -1790,13 +1792,35 @@ WantedBy=timers.target
                     RETURN;
                 END IF;
 
-                args_json := COALESCE(task_row.payload_json, '[]'::jsonb);
+                payload_json := COALESCE(task_row.payload_json, '{}'::jsonb);
+                args_json := '[]'::jsonb;
+                kwargs_json := '{}'::jsonb;
+
+                IF jsonb_typeof(payload_json) = 'object' THEN
+                    IF payload_json ? 'args' OR payload_json ? 'kwargs' THEN
+                        args_json := COALESCE(payload_json->'args', '[]'::jsonb);
+                        kwargs_json := COALESCE(payload_json->'kwargs', '{}'::jsonb);
+                    ELSE
+                        kwargs_json := payload_json;
+                    END IF;
+                ELSIF jsonb_typeof(payload_json) = 'array' THEN
+                    args_json := payload_json;
+                END IF;
+
                 spec := jsonb_build_object(
                     'task_path', task_row.task_path,
                     'args', args_json,
-                    'kwargs', '{}'::jsonb,
+                    'kwargs', kwargs_json,
+                    'queue_name', COALESCE(task_row.queue_name, 'default'),
+                    'priority', COALESCE(task_row.priority, 0),
+                    'concurrency_key', task_row.concurrency_key,
+                    'concurrency_limit', COALESCE(task_row.concurrency_limit, 0),
                     'periodic_name', task_row.name,
-                    'scheduled_at', to_char(NOW() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"')
+                    'scheduled_at', to_char(NOW() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'),
+                    'exec', jsonb_build_object(
+                        'timeout_seconds', 900,
+                        'max_attempts', COALESCE(NULLIF(task_row.max_attempts, 0), 3)
+                    )
                 );
                 spec_hash := encode(digest(spec::text, 'sha256'), 'hex');
 
@@ -1807,11 +1831,14 @@ WantedBy=timers.target
                     run_after,
                     spec_json,
                     spec_hash,
+                    task_path,
                     status,
                     enqueued_at,
                     attempts,
                     max_attempts,
                     timeout_seconds,
+                    concurrency_key,
+                    concurrency_limit,
                     wait_count,
                     worker_ids,
                     errors_json,
@@ -1826,11 +1853,14 @@ WantedBy=timers.target
                     NOW(),
                     spec,
                     spec_hash,
+                    task_row.task_path,
                     'READY',
                     NOW(),
                     0,
                     COALESCE(NULLIF(task_row.max_attempts, 0), 3),
                     900,
+                    task_row.concurrency_key,
+                    COALESCE(task_row.concurrency_limit, 0),
                     0,
                     '[]'::jsonb,
                     '[]'::jsonb,
@@ -1851,6 +1881,9 @@ WantedBy=timers.target
             END;
             $$;
         """
+
+    def _ensure_pg_cron_function(self, cursor, dry_run):
+        sql = self._pg_cron_function_sql()
         if dry_run:
             self.stdout.write("dry-run: create function reproq_enqueue_periodic_task")
             return

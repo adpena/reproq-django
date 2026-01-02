@@ -9,6 +9,7 @@ from django.db import connections
 from django.utils import timezone
 
 from .db import resolve_queue_db
+from .serialization import encode_args_kwargs
 
 
 @dataclass(frozen=True)
@@ -95,12 +96,13 @@ def sync_recurring_tasks(*, using: str | None = None, clear_missing: bool = Fals
         keys = set()
         for task in alias_tasks:
             keys.add(task.key)
+            encoded_args, encoded_kwargs = encode_args_kwargs(tuple(task.args), task.kwargs)
             PeriodicTask.objects.using(db_alias).update_or_create(
                 name=task.key,
                 defaults={
                     "cron_expr": task.schedule,
                     "task_path": task.task_path,
-                    "payload_json": {"args": task.args, "kwargs": task.kwargs},
+                    "payload_json": {"args": encoded_args, "kwargs": encoded_kwargs},
                     "queue_name": task.queue_name,
                     "priority": task.priority,
                     "max_attempts": task.max_attempts,

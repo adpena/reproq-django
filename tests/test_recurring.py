@@ -1,6 +1,7 @@
 import os
 import sys
 import unittest
+from datetime import timedelta
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../src")))
 
@@ -36,6 +37,23 @@ class TestRecurringTasks(unittest.TestCase):
         self.assertEqual(task.queue_name, "default")
         self.assertEqual(task.payload_json, {"args": [1], "kwargs": {"x": 2}})
         self.assertTrue(task.enabled)
+
+    def test_sync_recurring_tasks_encodes_payload(self):
+        @recurring_module.recurring(
+            schedule="0 * * * *",
+            key="test-recurring-encoded",
+            args=(timedelta(minutes=5),),
+            kwargs={"delay": timedelta(seconds=30)},
+        )
+        def dummy_task():
+            return "ok"
+
+        count = recurring_module.sync_recurring_tasks(using="default")
+        self.assertEqual(count, 1)
+        task = PeriodicTask.objects.get(name="test-recurring-encoded")
+        payload = task.payload_json
+        self.assertEqual(payload["args"][0]["__reproq_type__"], "timedelta")
+        self.assertEqual(payload["kwargs"]["delay"]["__reproq_type__"], "timedelta")
 
 
 if __name__ == "__main__":
