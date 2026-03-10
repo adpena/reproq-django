@@ -1,6 +1,6 @@
 # Reproq Django 🚀
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://www.apache.org/licenses/LICENSE-2.0)
 [![Documentation](https://img.shields.io/badge/Docs-View%20Online-indigo)](https://adpena.github.io/reproq-django/)
 
 **Deterministic Background Tasks for Django 6.0+ powered by Go.**
@@ -713,3 +713,7 @@ Reproq is split into two repos:
 - **Reproq Worker**: The Go execution engine.
 
 Issues and PRs are welcome in both!
+
+## License
+
+Apache License 2.0. See [LICENSE](LICENSE).
