@@ -6,6 +6,7 @@ As an agent working on `reproq-django`, you must adhere to the following standar
 - Ensure the Django schema and logic remain compatible with the Go `reproq-worker`.
 - Use `uv` for all Python commands (install, migrations, tests).
 - Run `uv run pytest` to verify changes in the locked environment.
+- Before landing Python compatibility or dependency changes, run both locked local checks on Python 3.12, 3.13, 3.14, and 3.15: `uv run --isolated --locked --extra dev --python <version> ruff check .` and `uv run --isolated --locked --extra dev --python <version> pytest`. Keep each interpreter's environment isolated and verify the installed package versions; a classifier alone is not compatibility evidence.
 
 ## 2. Observability & API
 - Enhance `reproq_stats_api` to provide high-level insights (e.g., periodic task status, worker health).

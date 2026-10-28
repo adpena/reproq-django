@@ -18,11 +18,14 @@ classifiers = [
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
     "Programming Language :: Python :: 3.14",
+    "Programming Language :: Python :: 3.15",
 ]
 dependencies = [
-    "Django>=6.0,<7.0",
+    "Django>=6.0,<7.0; python_version < '3.15'",
+    "Django>=6.1.2,<7.0; python_version >= '3.15'",
     "croniter>=2.0.5",
-    "psycopg[binary]>=3.1.0",
+    "psycopg[binary]>=3.1.0; python_version < '3.15'",
+    "psycopg[binary]>=3.3.6; python_version >= '3.15'",
 ]
 
 [project.optional-dependencies]
