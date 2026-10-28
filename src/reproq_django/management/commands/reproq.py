@@ -6,6 +6,7 @@ import sys
 import platform
 import shutil
 import urllib.request
+from urllib.parse import quote
 import tempfile
 import hashlib
 import json
@@ -20,6 +21,17 @@ from django.utils import timezone
 from ...models import PeriodicTask, TaskRun, QueueControl
 from ...db import default_db_alias, parse_result_id, queue_db_aliases
 from ...recurring import sync_recurring_tasks
+
+
+def _add_worker_install_arguments(parser):
+    parser.add_argument("--source", type=str, help="Path to reproq-worker source")
+    parser.add_argument("--build", action="store_true", help="Force building from source")
+    parser.add_argument("--tag", type=str, default="latest", help="GitHub release tag")
+    parser.add_argument(
+        "--sha256", type=str,
+        help="Expected platform-specific binary SHA-256; download failures cannot fall back to a build.",
+    )
+
 
 class Command(BaseCommand):
     help = "Unified Reproq management command"
@@ -104,9 +116,7 @@ class Command(BaseCommand):
 
         # Install
         install_parser = subparsers.add_parser("install", help="Download or build the Go worker binary")
-        install_parser.add_argument("--source", type=str, help="Path to reproq-worker source")
-        install_parser.add_argument("--build", action="store_true", help="Force building from source")
-        install_parser.add_argument("--tag", type=str, default="latest", help="GitHub release tag")
+        _add_worker_install_arguments(install_parser)
 
         # Init
         init_parser = subparsers.add_parser("init", help="Bootstrap Reproq in the current project")
@@ -116,9 +126,7 @@ class Command(BaseCommand):
         init_parser.add_argument("--skip-install", action="store_true", help="Skip worker binary install")
         init_parser.add_argument("--skip-migrate", action="store_true", help="Skip Django migrations")
         init_parser.add_argument("--skip-worker-migrate", action="store_true", help="Skip worker SQL optimizations")
-        init_parser.add_argument("--source", type=str, help="Path to reproq-worker source")
-        init_parser.add_argument("--build", action="store_true", help="Force building from source")
-        init_parser.add_argument("--tag", type=str, default="latest", help="GitHub release tag")
+        _add_worker_install_arguments(init_parser)
 
         # Stats
         stats_parser = subparsers.add_parser("stats", help="Show task execution statistics")
@@ -211,9 +219,7 @@ class Command(BaseCommand):
 
         # Upgrade
         upgrade_parser = subparsers.add_parser("upgrade", help="Upgrade the Go worker binary")
-        upgrade_parser.add_argument("--source", type=str, help="Path to reproq-worker source")
-        upgrade_parser.add_argument("--build", action="store_true", help="Force building from source")
-        upgrade_parser.add_argument("--tag", type=str, default="latest", help="GitHub release tag")
+        _add_worker_install_arguments(upgrade_parser)
         upgrade_parser.add_argument("--skip-worker-migrate", action="store_true", help="Skip worker SQL optimizations")
 
         # systemd
@@ -713,6 +719,9 @@ class Command(BaseCommand):
 
     def run_install(self, options):
         self.stdout.write(self.style.MIGRATE_HEADING("Installing Reproq Go Worker..."))
+        expected = options.get("sha256")
+        if expected is not None:
+            expected = self._validated_checksum(expected)
 
         override_path = getattr(settings, "REPROQ_WORKER_BIN", None) or os.environ.get(
             "REPROQ_WORKER_BIN"
@@ -739,68 +748,73 @@ class Command(BaseCommand):
         self.stdout.write(f"Platform: {system}/{arch}")
         self.stdout.write(f"Target path: {target_path}")
 
-        with tempfile.NamedTemporaryFile(delete=False) as tmp_file:
+        # Stage beside the destination so publication is one atomic replacement.
+        with tempfile.NamedTemporaryFile(prefix=".reproq-install-", dir=bin_dir, delete=False) as tmp_file:
             tmp_path = tmp_file.name
 
-        success = False
-        if not options.get("build"):
-            tag = options.get("tag", "latest")
-            url = f"https://github.com/adpena/reproq-worker/releases/download/{tag}/{bin_name}"
-            if tag == "latest":
-                url = f"https://github.com/adpena/reproq-worker/releases/latest/download/{bin_name}"
-
-            self.stdout.write(f"Downloading pre-built binary: {url}")
-            try:
-                with urllib.request.urlopen(url) as response:
-                    with open(tmp_path, 'wb') as f:
-                        shutil.copyfileobj(response, f)
-                checksum = self._download_checksum(url)
-                if checksum:
-                    actual = self._sha256_file(tmp_path)
-                    if actual != checksum:
-                        raise CommandError("Downloaded binary checksum mismatch.")
-                    self.stdout.write(self.style.SUCCESS("✅ Checksum verified."))
+        try:
+            success = False
+            checksum = expected
+            if not options.get("build"):
+                tag = options.get("tag", "latest")
+                url = (
+                    f"https://github.com/adpena/reproq-worker/releases/download/{quote(tag, safe='')}/{bin_name}"
+                    if tag != "latest" else
+                    f"https://github.com/adpena/reproq-worker/releases/latest/download/{bin_name}"
+                )
+                self.stdout.write(f"Downloading pre-built binary: {url}")
+                try:
+                    with urllib.request.urlopen(url, timeout=30) as response:
+                        with open(tmp_path, "wb") as destination:
+                            shutil.copyfileobj(response, destination)
+                except Exception as error:
+                    if expected is not None:
+                        raise CommandError("Pinned worker download failed; source fallback is disabled.") from error
+                    self.stdout.write(self.style.WARNING(f"Download failed: {error}"))
                 else:
-                    self.stdout.write(self.style.WARNING("Checksum not found; skipping verification."))
-                success = True
-            except Exception as e:
-                self.stdout.write(self.style.WARNING(f"Download failed: {e}"))
+                    # Integrity errors must never enter the source-build fallback.
+                    checksum = expected or self._download_checksum(url) or self._release_checksum(tag, bin_name)
+                    success = True
 
-        if not success:
-            source_path = options.get("source") or os.path.join(
-                os.path.dirname(
+            if not success:
+                source_path = options.get("source") or os.path.join(
                     os.path.dirname(
                         os.path.dirname(
-                            os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+                            os.path.dirname(
+                                os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+                            )
                         )
-                    )
-                ),
-                "reproq-worker",
-            )
-            if os.path.exists(source_path):
+                    ),
+                    "reproq-worker",
+                )
+                if not os.path.isdir(source_path):
+                    raise CommandError(f"Worker source not found: {source_path}")
                 self.stdout.write(f"Building from local source: {source_path}...")
                 try:
                     subprocess.run(["go", "build", "-tags", "prod", "-o", tmp_path, "./cmd/reproq"], cwd=source_path, check=True)
-                    success = True
-                except Exception as e:
-                    self.stderr.write(self.style.WARNING(f"Local build failed: {e}"))
+                except Exception as error:
+                    raise CommandError(f"Worker source build failed: {error}") from error
+
+            actual = self._sha256_file(tmp_path)
+            if checksum is not None:
+                if actual != self._validated_checksum(checksum):
+                    raise CommandError("Worker binary SHA-256 mismatch; nothing was executed or installed.")
+                self.stdout.write(self.style.SUCCESS(f"SHA-256 verified: {actual}"))
             else:
-                self.stdout.write(self.style.WARNING(f"Local source not found: {source_path}"))
-
-        if not success:
-            self.stderr.write(self.style.ERROR("Failed to install worker."))
-            sys.exit(1)
-
-        if system != "windows":
-            os.chmod(tmp_path, 0o755)
-        try:
-            subprocess.check_output([tmp_path, "--version"])
-            shutil.move(tmp_path, target_path)
+                self.stdout.write(f"Source-built worker SHA-256: {actual}")
+            if system != "windows":
+                os.chmod(tmp_path, 0o755)
+            try:
+                subprocess.check_output([tmp_path, "--version"], timeout=30)
+                os.replace(tmp_path, target_path)
+            except Exception as error:
+                raise CommandError(f"Worker verification or publication failed: {error}") from error
             self.stdout.write(self.style.SUCCESS(f"Successfully installed to {target_path}"))
-        except Exception as e:
-            self.stderr.write(self.style.ERROR(f"Verification failed: {e}"))
-            os.unlink(tmp_path)
-            sys.exit(1)
+        finally:
+            try:
+                os.unlink(tmp_path)
+            except FileNotFoundError:
+                pass
 
     def run_systemd(self, options):
         import getpass
@@ -2234,16 +2248,54 @@ WantedBy=timers.target
                 h.update(chunk)
         return h.hexdigest()
 
+    @staticmethod
+    def _validated_checksum(value):
+        if not isinstance(value, str) or re.fullmatch(r"[a-fA-F0-9]{64}", value) is None:
+            raise CommandError("Expected a complete 64-character SHA-256 digest.")
+        return value.lower()
+
     def _download_checksum(self, url):
         checksum_url = f"{url}.sha256"
         try:
-            with urllib.request.urlopen(checksum_url) as response:
-                payload = response.read().decode().strip()
+            with urllib.request.urlopen(checksum_url, timeout=30) as response:
+                payload = response.read(4097)
         except Exception:
             return ""
+        if len(payload) > 4096:
+            raise CommandError("Worker checksum sidecar is too large.")
+        try:
+            payload = payload.decode().strip()
+        except UnicodeDecodeError as error:
+            raise CommandError("Worker checksum sidecar is not text.") from error
         if not payload:
             return ""
-        return payload.split()[0]
+        return self._validated_checksum(payload.split()[0])
+
+    def _release_checksum(self, tag, asset_name):
+        """Use the publisher's asset digest when no checksum sidecar exists."""
+        endpoint = "latest" if tag == "latest" else f"tags/{quote(tag, safe='')}"
+        request = urllib.request.Request(
+            f"https://api.github.com/repos/adpena/reproq-worker/releases/{endpoint}",
+            headers={"Accept": "application/vnd.github+json", "User-Agent": "reproq-django"},
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=30) as response:
+                payload = response.read(1024 * 1024 + 1)
+            if len(payload) > 1024 * 1024:
+                raise ValueError("Release metadata is too large")
+            document = json.loads(payload)
+            matches = [asset for asset in document["assets"] if asset["name"] == asset_name]
+            if len(matches) != 1 or not isinstance(matches[0].get("digest"), str):
+                raise ValueError("Release has no unique digest for this platform")
+            algorithm, separator, digest = matches[0]["digest"].partition(":")
+            if algorithm != "sha256" or not separator:
+                raise ValueError("Release asset has no SHA-256 digest")
+            return self._validated_checksum(digest)
+        except Exception as error:
+            raise CommandError(
+                "Cannot verify the downloaded worker. Pin --sha256 or publish a checksum/digest; "
+                "nothing was executed or installed."
+            ) from error
 
     def _render_env(self, key, value):
         escaped = str(value).replace('"', '\\"')

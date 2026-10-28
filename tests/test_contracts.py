@@ -19,7 +19,7 @@ def test_spec_hash_contract():
         "args": [1, {"nested": True}],
         "kwargs": {
             "amount": Decimal("12.34"),
-            "token": UUID("123e4567-e89b-12d3-a456-426614174000"),
+            "token": "task-token-example",
             "notes": "hello",
         },
         "takes_context": False,
@@ -36,3 +36,7 @@ def test_spec_hash_contract():
     canonical = canonical_json(spec)
     assert canonical == expected_canonical
     assert spec_hash_for(spec) == expected_hash
+
+
+def test_typed_uuid_serialization():
+    assert canonical_json({"token": UUID(int=1)}) == '{"token":"00000000-0000-0000-0000-000000000001"}'

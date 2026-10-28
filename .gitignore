@@ -136,3 +136,4 @@ src/reproq_django/bin/
 
 # OS
 .DS_Store
+.local/

@@ -1,0 +1,3 @@
+include Makefile uv.lock
+include contracts/spec_hash.json contracts/spec_hash.sha256
+recursive-include tests *.py

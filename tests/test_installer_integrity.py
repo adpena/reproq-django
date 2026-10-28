@@ -1,0 +1,165 @@
+import hashlib
+import io
+import json
+from pathlib import Path
+from urllib.error import HTTPError
+
+import pytest
+from django.core.management.base import CommandError
+
+from reproq_django.management.commands import reproq
+
+
+BINARY = b"verified worker fixture"
+DIGEST = hashlib.sha256(BINARY).hexdigest()
+
+
+@pytest.fixture
+def installation(tmp_path, settings, monkeypatch):
+    target = tmp_path / "bin" / "reproq"
+    target.parent.mkdir()
+    target.write_bytes(b"previous worker")
+    settings.REPROQ_WORKER_BIN = str(target)
+    monkeypatch.setattr(reproq.platform, "system", lambda: "Linux")
+    monkeypatch.setattr(reproq.platform, "machine", lambda: "x86_64")
+    executions, builds = [], []
+
+    def execute(argv, **kwargs):
+        assert hashlib.sha256(Path(argv[0]).read_bytes()).hexdigest() == DIGEST
+        assert target.read_bytes() == b"previous worker"
+        assert kwargs == {"timeout": 30}
+        executions.append(argv)
+        return b"reproq v0.0.144"
+
+    def build(argv, **kwargs):
+        builds.append((argv, kwargs))
+        Path(argv[argv.index("-o") + 1]).write_bytes(BINARY)
+
+    monkeypatch.setattr(reproq.subprocess, "check_output", execute)
+    monkeypatch.setattr(reproq.subprocess, "run", build)
+    return target, executions, builds
+
+
+def serve(monkeypatch, *, binary=BINARY, sidecar=None, document=None, download_error=None):
+    requests = []
+
+    def open_url(request, **kwargs):
+        url = request.full_url if isinstance(request, reproq.urllib.request.Request) else request
+        requests.append(url)
+        assert kwargs == {"timeout": 30}
+        if url.startswith("https://api.github.com/"):
+            if isinstance(document, Exception):
+                raise document
+            return io.BytesIO(json.dumps(document).encode())
+        if url.endswith(".sha256"):
+            if sidecar is None:
+                raise HTTPError(url, 404, "Not found", {}, None)
+            return io.BytesIO(sidecar)
+        if download_error:
+            raise download_error
+        return io.BytesIO(binary)
+
+    monkeypatch.setattr(reproq.urllib.request, "urlopen", open_url)
+    return requests
+
+
+def assert_preserved(installation):
+    target, executions, builds = installation
+    assert target.read_bytes() == b"previous worker"
+    assert not executions
+    assert not builds
+    assert list(target.parent.glob(".reproq-install-*")) == []
+
+
+def test_explicit_pin_is_checked_before_execution_and_atomic_publication(installation, monkeypatch):
+    requests = serve(monkeypatch)
+    reproq.Command().run_install({"tag": "v0.0.144", "sha256": DIGEST.upper()})
+    target, executions, builds = installation
+    assert target.read_bytes() == BINARY
+    assert len(executions) == 1
+    assert Path(executions[0][0]).parent == target.parent
+    assert not builds
+    assert len(requests) == 1  # Explicit pins do not depend on mutable checksum metadata.
+    assert "/download/v0.0.144/reproq-linux-amd64" in requests[0]
+    assert list(target.parent.glob(".reproq-install-*")) == []
+
+
+@pytest.mark.parametrize("digest", ["", "0" * 63, "g" * 64, " " + DIGEST, None])
+def test_invalid_explicit_pin_stops_before_network(installation, monkeypatch, digest):
+    if digest is None:
+        digest = 123
+    requests = serve(monkeypatch)
+    with pytest.raises(CommandError, match="64-character"):
+        reproq.Command().run_install({"sha256": digest})
+    assert not requests
+    assert_preserved(installation)
+
+
+def test_digest_mismatch_cannot_execute_or_fall_back(installation, monkeypatch, tmp_path):
+    serve(monkeypatch, binary=b"wrong bytes")
+    with pytest.raises(CommandError, match="SHA-256 mismatch"):
+        reproq.Command().run_install({"sha256": DIGEST, "source": str(tmp_path)})
+    assert_preserved(installation)
+
+
+def test_pinned_download_error_cannot_fall_back_to_existing_source(installation, monkeypatch, tmp_path):
+    serve(monkeypatch, download_error=OSError("offline"))
+    with pytest.raises(CommandError, match="fallback is disabled"):
+        reproq.Command().run_install({"sha256": DIGEST, "source": str(tmp_path)})
+    assert_preserved(installation)
+
+
+def test_default_install_uses_official_release_digest_without_sidecar(installation, monkeypatch):
+    requests = serve(monkeypatch, document={"assets": [
+        {"name": "reproq-linux-amd64", "digest": "sha256:" + DIGEST},
+        {"name": "reproq-darwin-arm64", "digest": "sha256:" + "0" * 64},
+    ]})
+    reproq.Command().run_install({"tag": "v0.0.144"})
+    assert installation[0].read_bytes() == BINARY
+    assert len(installation[1]) == 1
+    assert requests[-1] == "https://api.github.com/repos/adpena/reproq-worker/releases/tags/v0.0.144"
+
+
+@pytest.mark.parametrize("document", [
+    {"assets": []},
+    {"assets": [{"name": "reproq-linux-amd64", "digest": None}]},
+    {"assets": [{"name": "reproq-linux-amd64", "digest": "md5:" + DIGEST}]},
+    {"assets": [{"name": "reproq-linux-amd64", "digest": "sha256:invalid"}]},
+    {"assets": [{"name": "reproq-linux-amd64", "digest": "sha256:" + DIGEST}] * 2},
+    OSError("metadata unavailable"),
+])
+def test_missing_or_invalid_release_integrity_fails_closed(installation, monkeypatch, document, tmp_path):
+    serve(monkeypatch, document=document)
+    with pytest.raises(CommandError, match="Cannot verify"):
+        reproq.Command().run_install({"source": str(tmp_path)})
+    assert_preserved(installation)
+
+
+@pytest.mark.parametrize("sidecar", [b"not-a-sha256", ("0" * 64).encode(), b"x" * 4097, b"\xff"])
+def test_sidecar_integrity_failure_cannot_fall_back(installation, monkeypatch, sidecar, tmp_path):
+    serve(monkeypatch, sidecar=sidecar)
+    with pytest.raises(CommandError):
+        reproq.Command().run_install({"source": str(tmp_path)})
+    assert_preserved(installation)
+
+
+def test_explicit_source_build_obeys_the_same_digest_before_execution(installation, tmp_path):
+    reproq.Command().run_install({"build": True, "source": str(tmp_path), "sha256": DIGEST})
+    assert installation[0].read_bytes() == BINARY
+    assert len(installation[1]) == len(installation[2]) == 1
+
+
+def test_failed_version_probe_preserves_target_and_cleans_staging(installation, monkeypatch):
+    serve(monkeypatch)
+    monkeypatch.setattr(reproq.subprocess, "check_output", lambda *a, **k: (_ for _ in ()).throw(OSError("broken")))
+    with pytest.raises(CommandError, match="verification or publication"):
+        reproq.Command().run_install({"sha256": DIGEST})
+    assert_preserved(installation)
+
+
+@pytest.mark.parametrize("subcommand", ["install", "init", "upgrade"])
+def test_every_install_entry_point_accepts_the_same_integrity_arguments(subcommand):
+    parser = reproq.Command().create_parser("manage.py", "reproq")
+    options = parser.parse_args([subcommand, "--tag", "v0.0.144", "--sha256", DIGEST])
+    assert options.sha256 == DIGEST
+    assert options.tag == "v0.0.144"

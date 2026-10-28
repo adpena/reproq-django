@@ -90,6 +90,29 @@ python manage.py reproq install
 ```
 *This command detects your OS/Architecture and fetches the correct pre-built binary from GitHub. No Go installation required!*
 
+Downloads must match the publisher's checksum sidecar or GitHub release-asset
+SHA-256 digest before the binary is made executable or its version is queried.
+For reproducible deployment, pin both a release tag and the digest of the
+binary for the target OS and architecture:
+
+~~~bash
+python manage.py reproq install --tag v0.0.144 --sha256 <platform-binary-sha256>
+~~~
+
+The same options work with init and upgrade. An explicit digest disables
+download-to-source fallback. Missing or mismatched integrity metadata stops
+installation and preserves the existing binary; it never triggers a source
+build. Explicit --build still supports local development and can also verify
+an expected digest. Successful installation replaces the binary atomically.
+
+Run the complete locked local lint and test suite with make check. The optional
+hosted CI workflow is manual and calls the same command.
+Release builds are also manual: they require an existing reviewed tag matching
+both package version declarations, run the complete locked checks, and create
+a draft release. Existing releases and their assets are never overwritten by
+that workflow. Local builds use uv build after make check; publishing and tag
+retention remain separate reviewed actions.
+
 ### 6. Run Migrations
 ```bash
 python manage.py reproq migrate-worker
