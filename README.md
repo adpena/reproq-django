@@ -27,7 +27,7 @@ Reproq is split into two specialized components:
 
 | Component | Supported |
 | :--- | :--- |
-| Django | 6.x; Python 3.12–3.14 requires `Django>=6.0.9,<7.0`, and Python 3.15 requires `Django>=6.1.2,<7.0` |
+| Django | 6.x; Python 3.12–3.14 requires `Django>=6.0.9,!=6.1.0,!=6.1.1,<7.0`, and Python 3.15 requires `Django>=6.1.2,<7.0` |
 | Python | 3.12–3.15, checked locally with isolated locked environments |
 | Reproq Worker | Latest release (install/upgrade via `python manage.py reproq install` / `upgrade`) |
 
@@ -39,6 +39,10 @@ and `psycopg[binary]` 3.3.6. As of October 28, 2026, Django's upstream
 plan official Python 3.15 support for that release. The current lock uses released
 packages, with no prerelease or source pins. Earlier Python versions use the
 [patched Django 6.0 branch](https://www.djangoproject.com/weblog/2026/oct/06/security-releases/).
+The explicit 6.1.0 and 6.1.1 exclusions prevent an installed affected higher
+minor release from satisfying the older-Python security floor. They cover
+known published versions, rather than promising security for future releases.
+Package builds require `setuptools>=84.1.0` and `wheel>=0.46.2`.
 
 ---
 
