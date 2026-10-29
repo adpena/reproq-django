@@ -41,6 +41,13 @@ def _add_worker_install_arguments(parser):
 class Command(BaseCommand):
     help = "Unified Reproq management command"
 
+    def get_check_kwargs(self, options):
+        # Installation must work before database setup. Django 6.1 model checks
+        # can open a database even when the handler itself is entirely offline.
+        if options.get("subcommand") == "install":
+            return {"tags": []}
+        return super().get_check_kwargs(options)
+
     def add_arguments(self, parser):
         subparsers = parser.add_subparsers(dest="subcommand", required=True)
 

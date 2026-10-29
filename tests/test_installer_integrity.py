@@ -90,6 +90,30 @@ def test_explicit_pin_is_checked_before_execution_and_atomic_publication(install
     assert list(target.parent.glob(".reproq-install-*")) == []
 
 
+def test_management_install_does_not_open_a_database(installation, monkeypatch):
+    from django.core.management import call_command
+    from django.db.backends.base.base import BaseDatabaseWrapper
+
+    def forbidden_connection(*args, **kwargs):
+        raise AssertionError("Worker installation must not open a database")
+
+    monkeypatch.setattr(BaseDatabaseWrapper, "ensure_connection", forbidden_connection)
+    serve(monkeypatch)
+    call_command("reproq", "install", sha256=DIGEST, skip_checks=False, stdout=io.StringIO())
+    assert installation[0].read_bytes() == BINARY
+    assert len(installation[1]) == 1
+    assert not installation[2]
+
+
+def test_install_check_selection_preserves_native_operational_checks():
+    from django.core.management.base import BaseCommand
+
+    command = reproq.Command()
+    for subcommand in ("worker", "beat", "schedule", "doctor", "pg-cron", "migrate-worker", "init"):
+        options = {"subcommand": subcommand}
+        assert command.get_check_kwargs(options) == BaseCommand.get_check_kwargs(command, options)
+
+
 @pytest.mark.parametrize("digest", ["", "0" * 63, "g" * 64, " " + DIGEST, None])
 def test_invalid_explicit_pin_stops_before_network(installation, monkeypatch, digest):
     if digest is None:
