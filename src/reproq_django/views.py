@@ -7,7 +7,7 @@ import urllib.error
 import urllib.request
 
 from django.conf import settings
-from django.db import connection
+from django.db import connections
 from django.db.models import Count
 from django.http import HttpResponse, JsonResponse, StreamingHttpResponse
 from django.utils import timezone
@@ -15,6 +15,7 @@ from datetime import timedelta
 from django.views.decorators.http import require_GET
 
 from .models import TaskRun, Worker, PeriodicTask, QueueControl
+from .recurring import periodic_definition_status
 from .db import default_db_alias, queue_db_aliases
 from .tui_auth import (
     get_tui_internal_endpoints,
@@ -68,50 +69,34 @@ def _stats_db_aliases():
     return [default_db_alias()]
 
 
-def _beat_configured():
-    scheduler_mode = os.environ.get("REPROQ_SCHEDULER_MODE", "").strip().lower()
-    if scheduler_mode and scheduler_mode != "beat":
-        return False
-    if "REPROQ_BEAT_CMD" not in os.environ:
-        return True
-    normalized = os.environ.get("REPROQ_BEAT_CMD", "").strip().lower()
-    return normalized not in {"", "0", "false", "off", "disabled", "none"}
+def _scheduler_status(aliases, periodic):
+    from .pg_cron import is_available
 
+    databases = []
+    for alias in aliases:
+        native = False
+        error_type = None
+        conn = connections[alias]
+        if conn.vendor == 'postgresql':
+            try:
+                with conn.cursor() as cursor:
+                    native = is_available(cursor)
+            except Exception as error:
+                native = None
+                error_type = type(error).__name__
+        rows = [row for row in periodic if row['database'] == alias and row['enabled']]
+        databases.append({'alias': alias, 'native_extension_installed': native,
+                          'capability_probe_error_type': error_type,
+                          'registered_definitions': {provider: sum(
+                              row['scheduler_provider'] == provider and row['definition_status'] == 'registered'
+                              for row in rows) for provider in ('go', 'pg_cron')},
+                          'execution_observed': False})
+    return {'configured_mode': getattr(settings, 'REPROQ_SCHEDULER_MODE', '')
+            or os.environ.get('REPROQ_SCHEDULER_MODE', '') or 'unspecified',
+            'low_memory': tui_low_memory_enabled(), 'observed_state': 'unknown',
+            'databases': databases,
+            'note': 'Configuration, registration and extension installation do not prove scheduler execution.'}
 
-def _pg_cron_available():
-    if connection.vendor != "postgresql":
-        return False
-    try:
-        with connection.cursor() as cursor:
-            cursor.execute(
-                "SELECT COUNT(*) FROM pg_available_extensions WHERE name = 'pg_cron';"
-            )
-            return bool(cursor.fetchone()[0])
-    except Exception:
-        return False
-
-
-def _scheduler_status():
-    low_memory = tui_low_memory_enabled()
-    beat_configured = _beat_configured()
-    beat_enabled = beat_configured and not low_memory
-    pg_cron_available = _pg_cron_available()
-    if beat_enabled:
-        mode = "beat"
-    elif pg_cron_available:
-        mode = "pg_cron"
-    else:
-        mode = "disabled"
-    payload = {
-        "mode": mode,
-        "low_memory": low_memory,
-        "beat_enabled": beat_enabled,
-        "beat_configured": beat_configured,
-        "pg_cron_available": pg_cron_available,
-    }
-    if mode == "disabled":
-        payload["warning"] = "Periodic schedules are disabled."
-    return payload
 
 def _client_ip(request):
     forwarded = request.META.get("HTTP_X_FORWARDED_FOR", "")
@@ -186,8 +171,15 @@ def reproq_stats_api(request):
             "worker_id", "hostname", "concurrency", "queues", "last_seen_at", "version"
         )
         periodic_stats = PeriodicTask.objects.using(alias).all().values(
-            "name", "cron_expr", "enabled", "next_run_at", "queue_name"
+            "name", "cron_expr", "enabled", "next_run_at", "queue_name", "last_run_at",
+            "scheduler_provider", "spec_version"
         )
+        periodic_stats = list(periodic_stats)
+        for row in periodic_stats:
+            row["definition_status"] = periodic_definition_status(row["spec_version"], row["scheduler_provider"])
+            if row["scheduler_provider"] == "pg_cron":
+                row["next_run_at"] = None
+                row["occurrence_clock"] = "UTC execution minute; scheduled by native pg_cron"
         controls = QueueControl.objects.using(alias).all().values(
             "queue_name", "paused", "paused_at", "reason", "updated_at"
         )
@@ -254,25 +246,11 @@ def reproq_stats_api(request):
         "periodic": periodic,
         "queue_controls": queue_controls,
         "worker_health": {"alive": alive, "dead": dead},
-        "scheduler": _scheduler_status(),
+        "scheduler": _scheduler_status(aliases, periodic),
         "top_failing": top_failing_list,
         "databases": databases,
     })
 
-def reproq_stress_test_api(request):
-    """
-    Triggers a stress test via API.
-    """
-    if not request.user.is_staff or request.method != "POST":
-        return JsonResponse({"error": "Unauthorized"}, status=403)
-
-    from .tasks import debug_noop_task
-    count = int(request.POST.get("count", 100))
-    
-    for _ in range(count):
-        debug_noop_task.enqueue(sleep_seconds=0.1)
-
-    return JsonResponse({"ok": True, "enqueued": count})
 
 
 def _proxy_target(kind):

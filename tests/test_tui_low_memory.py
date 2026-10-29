@@ -26,19 +26,12 @@ def test_stats_token_empty_when_unset(monkeypatch):
     assert views._get_stats_token() == ""
 
 
-def test_beat_configured_defaults_when_mode_is_beat(monkeypatch):
-    monkeypatch.setenv("REPROQ_SCHEDULER_MODE", "beat")
-    monkeypatch.delenv("REPROQ_BEAT_CMD", raising=False)
-    assert views._beat_configured() is True
-
-
-def test_beat_configured_disabled_when_mode_is_cron(monkeypatch):
-    monkeypatch.setenv("REPROQ_SCHEDULER_MODE", "cron")
-    monkeypatch.setenv("REPROQ_BEAT_CMD", "uv run python manage.py reproq beat")
-    assert views._beat_configured() is False
-
-
-def test_beat_configured_respects_disabled_cmd(monkeypatch):
-    monkeypatch.setenv("REPROQ_SCHEDULER_MODE", "beat")
-    monkeypatch.setenv("REPROQ_BEAT_CMD", "off")
-    assert views._beat_configured() is False
+def test_scheduler_configuration_does_not_claim_observed_execution(monkeypatch):
+    monkeypatch.setenv('REPROQ_SCHEDULER_MODE', 'pg_cron')
+    monkeypatch.setenv('LOW_MEMORY_MODE', '1')
+    result = views._scheduler_status(['default'], [])
+    assert result['configured_mode'] == 'pg_cron'
+    assert result['observed_state'] == 'unknown'
+    assert result['databases'][0]['native_extension_installed'] is False
+    assert result['databases'][0]['execution_observed'] is False
+    assert result['databases'][0]['registered_definitions'] == {'go': 0, 'pg_cron': 0}

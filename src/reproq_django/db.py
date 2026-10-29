@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import fnmatch
 from typing import Tuple
+from urllib.parse import quote, unquote
 
 from django.conf import settings
+from django.db import DEFAULT_DB_ALIAS
 
-DEFAULT_DB_ALIAS = "default"
+# Django's TaskResult contract requires IDs shorter than 64 characters.
+RESULT_ID_MAX_LENGTH = 63
 
 
 def default_db_alias() -> str:
@@ -41,18 +44,42 @@ def queue_db_aliases() -> list[str]:
 
 
 def should_prefix_result_ids() -> bool:
+    default = default_db_alias()
+    multiple = any(alias != default for alias in queue_database_map().values())
     override = getattr(settings, "REPROQ_RESULT_ID_WITH_ALIAS", None)
     if override is not None:
-        return bool(override)
-    return len(queue_db_aliases()) > 1
+        if type(override) is not bool or (multiple and not override):
+            raise ValueError(
+                "Multiple queue databases require unambiguous prefixed result IDs"
+            )
+        return override
+    return multiple
 
 
-def format_result_id(result_id: int | str, db_alias: str, include_alias: bool | None = None) -> str:
-    if include_alias is None:
-        include_alias = should_prefix_result_ids()
+def validate_result_id_routing(db_alias: str):
+    """Reject unsupported ID configuration before a producer writes a row."""
+    if not isinstance(db_alias, str) or db_alias not in settings.DATABASES:
+        raise ValueError("Queue database alias is not configured")
+    include_alias = should_prefix_result_ids() or db_alias != default_db_alias()
+    if include_alias:
+        from django.db.backends.base.operations import BaseDatabaseOperations
+
+        lower, upper = BaseDatabaseOperations.integer_field_ranges["BigAutoField"]
+        max_digits = max(len(str(lower)), len(str(upper)))
+        if len(quote(db_alias, safe="")) + 1 + max_digits > RESULT_ID_MAX_LENGTH:
+            raise ValueError(
+                "Encoded queue database alias cannot fit Django TaskResult IDs; use a shorter configured alias"
+            )
+
+
+def format_result_id(result_id: int | str, db_alias: str) -> str:
+    include_alias = should_prefix_result_ids() or db_alias != default_db_alias()
+    validate_result_id_routing(db_alias)
     result_str = str(result_id)
     if include_alias and db_alias:
-        return f"{db_alias}:{result_str}"
+        result_str = f"{quote(db_alias, safe='')}:{result_str}"
+    if len(result_str) > RESULT_ID_MAX_LENGTH:
+        raise ValueError("Task result ID exceeds the native Django length contract")
     return result_str
 
 
@@ -61,9 +88,13 @@ def parse_result_id(value: int | str) -> Tuple[str, str]:
         return default_db_alias(), str(value)
     raw = str(value)
     if ":" in raw:
-        alias, result_id = raw.split(":", 1)
-        if alias in queue_db_aliases() or alias in getattr(settings, "DATABASES", {}):
+        prefix, result_id = raw.split(":", 1)
+        alias = unquote(prefix, errors="strict")
+        if quote(alias, safe="") != prefix or not result_id:
+            raise ValueError("Noncanonical or incomplete task result ID")
+        if alias in getattr(settings, "DATABASES", {}):
             return alias, result_id
+        raise ValueError("Task result ID names an unknown database alias")
     return default_db_alias(), raw
 
 

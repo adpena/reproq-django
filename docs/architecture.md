@@ -1,55 +1,48 @@
-# Architecture Overview
+# Architecture
 
-Reproq follows a "split-brain" architecture to maximize both developer productivity and runtime performance.
+Django defines tasks and canonical serialized specs. Committed Django migrations
+own the six queue tables, constraints, contract marker and shared periodic enqueue
+function. Explicit audited adoption supports known legacy catalogs/history;
+neither workers, login hooks nor management helpers repair queue schemas.
 
-## Core Components
+Go owns claim, heartbeat, task process lifecycle, retry/reclaim and workflow
+finalization. Startup verifies schema2/executor protocol2 before registration or
+claims. Claims use SKIP LOCKED plus per-key concurrency arbitration and a fresh
+UUID lease token. RUNNING owner/token/unexpired database-clock lease fence state
+changes. Python's TaskContext uses the same fence for progress metadata.
 
-1. **Reproq Django (The Manager)**
-   - Responsible for task definition via the standard `@task` decorator.
-   - Manages the PostgreSQL tables (`task_runs`, `periodic_tasks`, `reproq_workers`, `reproq_queue_controls`).
-   - Provides the enqueuing logic and ensures tasks are written to the database with the correct `spec_hash`.
-   - Offers the Django Admin dashboard for monitoring and manual control.
+Go starts a bounded-lifetime Python provider per active task. Setup/import/hooks
+and native task writes are drained as logs on stderr; stdout contains exactly
+one complete bounded JSON result. Timeout/cancellation includes the owned process
+tree. Metadata/result ownership is rechecked before success publication. Expired
+leases and manual reclaim share Go transitions; SQLite is a local SDK test target,
+not a Go production queue backend.
 
-2. **Reproq Worker (The Runner)**
-   - A standalone Go binary.
-   - Uses a high-performance polling loop with `SKIP LOCKED` to claim tasks atomically.
-   - Manages a pool of worker goroutines.
-   - Executes tasks by invoking `python -m reproq_django.executor`.
-   - Handles heartbeats to ensure the system knows it's alive and can recover from crashes.
-   - Respects queue pause controls and concurrency limits when claiming tasks.
+Delivery is at least once. A token prevents stale queue/metadata writes; it does
+not undo an external side effect already performed by a task. Applications need
+idempotency keys or a transaction for those effects and for data publication.
 
-3. **Reproq Scheduler (Beat or pg_cron)**
-   - Beat: a lightweight Python process that scans `periodic_tasks`.
-   - pg_cron: a Postgres-native scheduler that calls `reproq_enqueue_periodic_task`.
-   - Only one scheduler should run per database.
+One SDK spec builder serves direct/bulk enqueue and explicit periodic
+registration. Go and optional pg_cron call the same migration-owned occurrence
+primitive, copying stored canonical text/hash instead of serializing another
+spec. Every periodic definition has a provider. Go coalesces one overdue nominal
+tick then advances from the DB clock. Native pg_cron records the UTC execution
+minute and follows its native catch-up behavior; its global cron.timezone must
+match the definition. Occurrence uniqueness survives terminal task states.
 
-4. **PostgreSQL (The Broker)**
-   - Reproq is "Postgres-native."
-   - The database is the single source of truth for task state, worker health, and periodic schedules.
+A small deployment can use one worker slot and one-shot scheduling, or pg_cron
+where the database actually supports it. Larger deployments add workers/queue
+routing without another task API. Measure Python task memory, DB connections,
+queue delay, task duration and end-to-end response latency before increasing
+concurrency. A compact Go coordinator cannot remove the memory cost of ETL.
 
-## The Execution Flow
-
-1. **Enqueue**: Python code calls `my_task.enqueue(args)`. Django inserts a row into `task_runs` with state `READY`.
-2. **Claim**: The Go worker polls the database. It finds the `READY` task and atomically updates it to `RUNNING`, setting its `worker_id` and a lease timestamp.
-3. **Execute**: The Go worker starts a Python sub-process. It passes the task payload via `stdin` as JSON.
-4. **Heartbeat**: While the Python process is running, the Go worker periodically updates the task's lease in the database.
-5. **Finalize**: Once the Python process finishes, it outputs the result (or traceback) to `stdout`. The Go worker captures this and updates the database state to `SUCCESSFUL` or `FAILED`.
-
-## Periodic Scheduling Flow
-1. **Schedule**: A `PeriodicTask` row defines `cron_expr`, `task_path`, and optional `queue_name`.
-2. **Scan**: Beat polls for due schedules or pg_cron triggers per cron expression.
-3. **Enqueue**: The scheduler inserts a corresponding `task_runs` row in `READY` state.
-
-## Data Flow Diagram
-```
-Producer code      PeriodicTask
-    |                  |
-    v                  v
-  task_runs  <----  beat/pg_cron
-    |
-    v
-reproq worker ---> python -m reproq_django.executor
-    |
-    v
-  task_runs (SUCCESSFUL/FAILED)
+```text
+Django direct/bulk specs ----> task_runs <---- shared periodic enqueue function
+                                   ^                       ^
+                                   |                 Go beat / pg_cron
+                         Go worker claim/token
+                                   |
+                         Python executor process
+                                   |
+                       fenced result / retry / failure
 ```

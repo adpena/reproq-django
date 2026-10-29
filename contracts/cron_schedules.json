@@ -1,0 +1,38 @@
+{
+  "schema_version": 1,
+  "grammar": "portable-cron-v1",
+  "accepted": [
+    "* * * * *",
+    "*/5 * * * *",
+    "0 0 * * *",
+    "0 0 * * 0",
+    "0 0 * * SUN",
+    "0 9 * * MON-FRI",
+    "0 0 1 JAN,MAR,DEC *",
+    "0 0 1-31/2 * *",
+    "0,15,30,45 8-18/2 * * 1-5",
+    "CRON_TZ=America/Chicago 0 0 * * *",
+    "TZ=UTC 30 12 * jan-dec mon-fri"
+  ],
+  "rejected": [
+    "0 0 * * 7",
+    "0 0 * * FRI-MON",
+    "0 0 L * *",
+    "0 0 * * 5#3",
+    "0 0 * * MON#1",
+    "@daily",
+    "10 seconds",
+    "* * * * * *",
+    "5/10 * * * *",
+    "*/0 * * * *",
+    "*/61 * * * *",
+    "0 24 * * *",
+    "0 0 0 * *",
+    "0 0 * 13 *",
+    "CRON_TZ=America/Chicago",
+    "TZ=UTC",
+    "0,,1 * * * *",
+    "0 0 * * ſUN",
+    "0 0 * * ſAT"
+  ]
+}

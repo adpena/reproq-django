@@ -47,9 +47,9 @@ where = ["src"]
 [tool.setuptools.package-data]
 reproq_django = [
     "templates/base.html",
-    "templates/admin/reproq_django/taskrun/change_list.html",
     "templates/reproq_tui/*.html",
     "resources/*.yaml",
     "resources/*.toml",
     "resources/*.sh",
+    "resources/*.sql",
 ]

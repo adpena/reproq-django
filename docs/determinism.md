@@ -61,14 +61,24 @@ deploy_id = str(uuid.uuid4())
 notify_deploy_success.enqueue(deploy_id=deploy_id)
 ```
 
-You can also bypass deduplication by changing the scheduling metadata:
+Scheduling and concurrency options also participate in the spec hash. Use
+Django's task options and ReproQ's concurrency decorator:
 ```python
 from datetime import timedelta
+from django.tasks import task
+from django.utils import timezone
+from reproq_django.concurrency import limits_concurrency
 
-# run_after, lock_key, and concurrency controls change the spec hash
-send_welcome_email.using(run_after=timedelta(minutes=5)).enqueue(123)
-send_welcome_email.enqueue(123, lock_key="user:123")
-send_welcome_email.enqueue(123, concurrency_key="user:123", concurrency_limit=2)
+send_welcome_email.using(
+    run_after=timezone.now() + timedelta(minutes=5),
+).enqueue(123)
+
+@limits_concurrency(lambda user_id: f"user:{user_id}", to=2)
+@task
+def refresh_user(user_id):
+    return update_user(user_id)
+
+refresh_user.enqueue(123)
 ```
 
 ## Inspecting a Spec Hash
@@ -81,7 +91,10 @@ task_run = TaskRun.objects.get(result_id=result_1.id)
 print(task_run.spec_hash)
 ```
 
-Reproq computes spec hashes using canonical JSON (sorted keys) and Django's JSON encoder to handle values like `Decimal`, `UUID`, and datetimes deterministically.
+ReproQ stores versioned canonical JSON with sorted keys and its typed argument
+codec, then hashes the exact UTF-8 bytes. The codec preserves values such as
+`Decimal`, `UUID`, datetimes and source-bound saved model references. Literal
+marker dictionaries remain ordinary user data.
 
 ### Note on `lock_key`
 `lock_key` is included in the canonical spec hash. Tasks that differ only by `lock_key` will **not** deduplicate when `DEDUP_ACTIVE` is enabled.

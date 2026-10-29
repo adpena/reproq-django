@@ -93,60 +93,52 @@ class TestReproqBackend(unittest.TestCase):
         self.assertEqual(res1.id, res2.id)
         self.assertEqual(TaskRun.objects.count(), 1)
 
-    def test_run_after_kwarg_is_reserved(self):
+    def test_scheduling_names_remain_function_kwargs(self):
+        from reproq_django.serialization import decode_args_kwargs
         my_func.__module__ = "test_module"
         task = Task(func=my_func, priority=0, queue_name="q", backend="default", run_after=None)
-        delay = timedelta(minutes=5)
+        payload = {"run_after": timedelta(minutes=5), "priority": 42, "lock_key": "argument",
+                   "concurrency_key": "argument-key", "concurrency_limit": 7}
+        result = self.backend.enqueue(task, (), payload)
+        run = TaskRun.objects.get(pk=result.id)
+        _, restored = decode_args_kwargs(run.spec_json["args"], run.spec_json["kwargs"])
+        self.assertEqual(restored, payload)
+        self.assertIsNone(run.run_after)
+        self.assertEqual(run.priority, 0)
+        self.assertIsNone(run.lock_key)
+        self.assertIsNone(run.concurrency_key)
+        self.assertEqual(run.concurrency_limit, 0)
 
-        result = self.backend.enqueue(task, (), {"run_after": delay, "debug": True})
-        run = TaskRun.objects.get(result_id=result.id)
-
-        self.assertIsInstance(run.spec_json.get("run_after"), str)
-        self.assertEqual(run.spec_json["kwargs"], {"debug": True})
-        self.assertIsNotNone(run.run_after)
-        self.assertGreater(run.run_after, dj_timezone.now() + timedelta(minutes=4))
-
-    def test_priority_override(self):
+    def test_native_using_options_and_same_named_arguments_coexist(self):
         my_func.__module__ = "test_module"
+        deadline = dj_timezone.now() + timedelta(minutes=5)
         task = Task(func=my_func, priority=0, queue_name="q", backend="default", run_after=None)
-
-        result = self.backend.enqueue(task, (), {"priority": 42})
-        run = TaskRun.objects.get(result_id=result.id)
-
+        task = task.using(priority=42, run_after=deadline)
+        result = self.backend.enqueue(task, (), {"priority": 7, "run_after": "task-argument"})
+        run = TaskRun.objects.get(pk=result.id)
         self.assertEqual(run.priority, 42)
-        self.assertEqual(run.spec_json["priority"], 42)
-        self.assertNotIn("priority", run.spec_json["kwargs"])
+        self.assertEqual(run.run_after, deadline)
+        self.assertEqual(run.spec_json["kwargs"], {"priority": 7, "run_after": "task-argument"})
 
-    def test_lock_key_changes_spec_hash(self):
-        my_func.__module__ = "test_module"
-        task = Task(func=my_func, priority=0, queue_name="q", backend="default", run_after=None)
-
-        res1 = self.backend.enqueue(task, (), {"lock_key": "alpha"})
-        res2 = self.backend.enqueue(task, (), {"lock_key": "beta"})
-
-        self.assertNotEqual(res1.id, res2.id)
-        self.assertEqual(TaskRun.objects.count(), 2)
-
-    def test_concurrency_fields_in_spec(self):
-        my_func.__module__ = "test_module"
-        task = Task(func=my_func, priority=0, queue_name="q", backend="default", run_after=None)
-        result = self.backend.enqueue(
-            task,
-            (),
-            {"concurrency_key": "user:42", "concurrency_limit": 2, "debug": True},
-        )
-        run = TaskRun.objects.get(result_id=result.id)
-        self.assertEqual(run.spec_json["concurrency_key"], "user:42")
-        self.assertEqual(run.spec_json["concurrency_limit"], 2)
-        self.assertEqual(run.spec_json["kwargs"], {"debug": True})
-
-    def test_save_metadata_updates_taskrun(self):
+    def test_owned_context_updates_taskrun_metadata(self):
+        from reproq_django.context import ExecutionClaim, TaskContext
         my_func.__module__ = "test_module"
         task = Task(func=my_func, priority=0, queue_name="q", backend="default", run_after=None)
         result = self.backend.enqueue(task, (), {})
-        self.backend.save_metadata(result.id, {"step": "queued"})
+        token = uuid.uuid4()
+        TaskRun.objects.filter(result_id=result.result_id).update(
+            status="RUNNING", leased_by="metadata-worker", lease_token=token,
+            attempts=1, worker_ids=['metadata-worker'],
+            leased_until=dj_timezone.now() + timedelta(minutes=1),
+        )
+        context = TaskContext.from_claim(ExecutionClaim(
+            result_id=result.result_id, budget_attempt=1, expected_task_path=task.module_path,
+            db_alias='default', worker_id='metadata-worker', lease_token=str(token),
+        ))
+        context.metadata['step'] = 'running'
+        context.save_metadata()
         run = TaskRun.objects.get(result_id=result.id)
-        self.assertEqual(run.metadata_json, {"step": "queued"})
+        self.assertEqual(run.metadata_json, {"step": "running"})
 
     def test_spec_hash_handles_decimal_and_uuid(self):
         my_func.__module__ = "test_module"
@@ -199,11 +191,10 @@ class TestReproqBackend(unittest.TestCase):
         self.assertGreater(run.expires_at, dj_timezone.now())
 
 class TestReproqManagement(unittest.TestCase):
-    @patch("django.db.connection.introspection.table_names", return_value=["task_runs"])
     @patch("reproq_django.management.commands.reproq.Command.get_dsn")
-    @patch("subprocess.check_output")
-    def test_check_command(self, mock_version, mock_get_dsn, _mock_tables):
-        mock_version.return_value = b"reproq version v0.1.0"
+    @patch("reproq_django.capabilities._capture_worker_capabilities")
+    def test_check_command(self, mock_version, mock_get_dsn):
+        mock_version.return_value = b'{"worker_version":"owned","schema_id":"reproq-schema-v2","schema_version":2,"executor_protocol":2}'
         mock_get_dsn.return_value = "postgres://user:pass@localhost:5432/db"
         from django.core.management import call_command
         from io import StringIO
@@ -211,25 +202,23 @@ class TestReproqManagement(unittest.TestCase):
         call_command("reproq", "check", stdout=out)
         self.assertIn("Configuration looks good", out.getvalue())
 
-    @patch("subprocess.run")
+    @patch("os.execvpe")
     @patch("reproq_django.management.commands.reproq.Command._resolve_worker_bin")
     @patch("reproq_django.management.commands.reproq.Command.get_dsn")
-    def test_worker_command_spawns_process(self, mock_get_dsn, mock_resolve_bin, mock_run):
+    @patch("reproq_django.management.commands.reproq.require_worker_capabilities")
+    def test_worker_command_replaces_foreground_process(self, mock_capabilities, mock_get_dsn, mock_resolve_bin, mock_exec):
         from django.core.management import call_command
         mock_get_dsn.return_value = "postgres://user:pass@localhost:5432/db"
         mock_resolve_bin.return_value = ("reproq", "/usr/local/bin/reproq", True)
-        # We don't actually want to run it, just see if it calls subprocess
-        with patch("sys.exit"): # avoid exit on keyboard interrupt
-            try:
-                call_command("reproq", "worker", "--concurrency", "5")
-            except Exception:
-                pass
-        
-        self.assertTrue(mock_run.called)
-        args = mock_run.call_args[0][0]
+        call_command("reproq", "worker", "--concurrency", "5")
+        self.assertTrue(mock_exec.called)
+        args = mock_exec.call_args[0][1]
         self.assertIn("worker", args)
         self.assertIn("--concurrency", args)
         self.assertIn("5", args)
+        self.assertNotIn("--dsn", args)
+        self.assertNotIn(mock_get_dsn.return_value, args)
+        self.assertEqual(mock_exec.call_args[0][2]["REPROQ_DATABASE_URL"], mock_get_dsn.return_value)
 
 class TestReproqModels(unittest.TestCase):
     def test_periodic_task_creation(self):
@@ -260,29 +249,25 @@ class TestTaskResultProxyStatusMapping(unittest.TestCase):
             params={"QUEUES": ["default"]},
         )
 
-    def test_ready_maps_to_pending_when_available(self):
+    def test_ready_maps_to_native_ready(self):
         run = TaskRun.objects.create(
             spec_json={},
             spec_hash="ready" + "0" * 59,
             status="READY",
         )
         proxy = TaskResultProxy(str(run.result_id), self.backend)
-        if "PENDING" in TaskResultStatus.__members__:
-            self.assertEqual(proxy.status, TaskResultStatus.PENDING)
-        else:
-            self.assertEqual(proxy.raw_status, "READY")
+        self.assertEqual(proxy.status, TaskResultStatus.READY)
+        self.assertEqual(proxy.raw_status, "READY")
 
-    def test_cancelled_maps_when_available(self):
+    def test_cancelled_projects_to_native_failed_and_preserves_raw_status(self):
         run = TaskRun.objects.create(
             spec_json={},
             spec_hash="cancel" + "0" * 58,
             status="CANCELLED",
         )
         proxy = TaskResultProxy(str(run.result_id), self.backend)
-        if "CANCELLED" in TaskResultStatus.__members__:
-            self.assertEqual(proxy.status, TaskResultStatus.CANCELLED)
-        else:
-            self.assertEqual(proxy.raw_status, "CANCELLED")
+        self.assertEqual(proxy.status, TaskResultStatus.FAILED)
+        self.assertEqual(proxy.raw_status, "CANCELLED")
 
     def test_wait_returns_on_cancelled(self):
         run = TaskRun.objects.create(
@@ -291,10 +276,9 @@ class TestTaskResultProxyStatusMapping(unittest.TestCase):
             status="CANCELLED",
         )
         proxy = TaskResultProxy(str(run.result_id), self.backend)
-        if "CANCELLED" in TaskResultStatus.__members__:
-            self.assertIs(proxy.wait(timeout=0.1, poll_interval=0), proxy)
-        else:
-            self.assertEqual(proxy.raw_status, "CANCELLED")
+        self.assertIs(proxy.wait(timeout=0, poll_interval=0), proxy)
+        self.assertEqual(proxy.status, TaskResultStatus.FAILED)
+        self.assertEqual(proxy.raw_status, "CANCELLED")
 
 class TestMultiDatabaseRouting(unittest.TestCase):
     @override_settings(

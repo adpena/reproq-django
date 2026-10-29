@@ -44,12 +44,11 @@ class TestManagementCommands(unittest.TestCase):
         defaults.update(kwargs)
         return TaskRun.objects.create(**defaults)
 
-    def test_cancel_command_marks_cancel(self):
-        run = self._create_taskrun(spec_hash="c" * 64)
+    def test_cancel_command_delegates_to_canonical_operator(self):
         out = StringIO()
-        call_command("reproq", "cancel", "--id", str(run.result_id), stdout=out)
-        run.refresh_from_db()
-        self.assertTrue(run.cancel_requested)
+        with patch('reproq_django.operations.task_operation') as operation:
+            call_command("reproq", "cancel", "--id", '17', stdout=out)
+        operation.assert_called_once_with('cancel', '17', using='default')
 
     def test_logs_command_tails(self):
         with tempfile.NamedTemporaryFile("w", delete=False, encoding="utf-8") as handle:
@@ -155,22 +154,13 @@ class TestManagementCommands(unittest.TestCase):
     def test_pg_cron_if_supported_skips_non_postgres(self):
         call_command("reproq", "pg-cron", "--if-supported")
 
-    def test_pg_cron_function_spec_fields(self):
-        sql = Command()._pg_cron_function_sql()
-        expected = [
-            "'task_path'",
-            "'args'",
-            "'kwargs'",
-            "'queue_name'",
-            "'priority'",
-            "'concurrency_key'",
-            "'concurrency_limit'",
-            "'periodic_name'",
-            "'scheduled_at'",
-            "'exec'",
-        ]
-        for needle in expected:
-            self.assertIn(needle, sql)
+    def test_pg_cron_has_no_parallel_spec_or_function_builder(self):
+        from reproq_django.pg_cron import occurrence_command
+
+        command = occurrence_command("daily_cleanup")
+        self.assertIn("public.reproq_enqueue_periodic_occurrence", command)
+        self.assertIn("'pg_cron'", command)
+        self.assertFalse(hasattr(Command, "_pg_cron_function_sql"))
 
 
 if __name__ == "__main__":

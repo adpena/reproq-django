@@ -1,21 +1,16 @@
 import json
-import uuid
 from django.contrib import admin, messages
 from django.utils.safestring import mark_safe
-from django.utils.html import format_html
+from django.utils.html import format_html, format_html_join
 from django.utils import timezone
 from django.db.models import Count, Q
+from django.db import router
 from datetime import timedelta
-from django.urls import path, reverse
-from django.http import HttpResponseRedirect
 from .models import TaskRun, Worker, PeriodicTask, RateLimit, WorkflowRun, QueueControl
-from .serialization import spec_hash_for
+from .recurring import periodic_definition_status
 
 def format_json(field_data):
-    if not field_data:
-        return mark_safe("<pre>{}</pre>")
-    res = json.dumps(field_data, indent=2, sort_keys=True)
-    return mark_safe(f"<pre>{res}</pre>")
+    return format_html('<pre>{}</pre>', json.dumps(field_data, indent=2, sort_keys=True))
 
 class LeaseStatusFilter(admin.SimpleListFilter):
     title = "Lease"
@@ -86,10 +81,46 @@ class QueueControlAdmin(admin.ModelAdmin):
 
 @admin.register(PeriodicTask)
 class PeriodicTaskAdmin(admin.ModelAdmin):
-    list_display = ("name", "cron_expr", "task_path", "queue_name", "priority", "concurrency_display", "next_run_at", "enabled", "last_run_at")
-    list_filter = ("enabled", "queue_name")
+    list_display = ("name", "cron_expr", "task_path", "queue_name", "priority", "concurrency_display", "scheduler_provider", "registration_status", "next_occurrence", "enabled", "last_run_at")
+    list_filter = ("enabled", "queue_name", "scheduler_provider")
     search_fields = ("name", "task_path")
     ordering = ("next_run_at",)
+
+    def get_readonly_fields(self, request, obj=None):
+        # Source intent/spec identity goes through register_periodic. Operators
+        # may pause a definition here without accidentally reserializing it.
+        return tuple(field.name for field in self.model._meta.fields if field.name != "enabled")
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        return False
+
+    def save_model(self, request, obj, form, change):
+        from .schema_contract import require_schema_contract
+        from django.db import connections
+
+        alias = obj._state.db or router.db_for_write(self.model, instance=obj)
+        require_schema_contract(connections[alias])
+        # Do not overwrite concurrent source reconciliation with stale readonly
+        # field values loaded when this admin form was opened.
+        changed = self.model.objects.using(alias).filter(pk=obj.pk).update(
+            enabled=obj.enabled, updated_at=timezone.now()
+        )
+        if changed != 1:
+            raise ValueError("Periodic definition no longer exists; reload before changing it.")
+
+    @admin.display(description="Registration")
+    def registration_status(self, obj):
+        status = periodic_definition_status(obj.spec_version, obj.scheduler_provider)
+        return "Reconciliation required" if status == "reconciliation_required" else "Registered"
+
+    @admin.display(description="Next occurrence")
+    def next_occurrence(self, obj):
+        if obj.scheduler_provider == "pg_cron":
+            return "Managed by native pg_cron"
+        return obj.next_run_at
 
     def concurrency_display(self, obj):
         if obj.concurrency_limit and obj.concurrency_key:
@@ -104,6 +135,11 @@ class WorkflowRunAdmin(admin.ModelAdmin):
     list_display = ("workflow_id", "status", "expected_count", "success_count", "failure_count", "callback_result_id", "updated_at")
     search_fields = ("workflow_id", "callback_result_id")
     ordering = ("-updated_at",)
+    readonly_fields = tuple(field.name for field in WorkflowRun._meta.fields)
+
+    def has_add_permission(self, request): return False
+
+    def has_delete_permission(self, request, obj=None): return False
 
 @admin.register(RateLimit)
 class RateLimitAdmin(admin.ModelAdmin):
@@ -143,24 +179,8 @@ class TaskRunAdmin(admin.ModelAdmin):
     actions = [
         "replay_tasks",
         "retry_failed_tasks",
-        "discard_failed_tasks",
         "cancel_tasks",
-        "delete_successful_tasks",
-        "create_expired_lease_test_task",
     ]
-    change_list_template = "admin/reproq_django/taskrun/change_list.html"
-
-    def get_urls(self):
-        urls = super().get_urls()
-        custom_urls = [
-            path(
-                "create-expired-lease/",
-                self.admin_site.admin_view(self.create_expired_lease_view),
-                name="reproq_django_taskrun_create_expired_lease",
-            )
-        ]
-        return custom_urls + urls
-
     def status_badge(self, obj):
         colors = {
             "READY": "#777",
@@ -212,18 +232,16 @@ class TaskRunAdmin(admin.ModelAdmin):
     def pretty_return(self, obj): return format_json(obj.return_json)
 
     def duplicate_specs(self, obj):
-        others = TaskRun.objects.filter(spec_hash=obj.spec_hash).exclude(result_id=obj.result_id)
+        others = TaskRun.objects.using(obj._state.db).filter(spec_hash=obj.spec_hash).exclude(result_id=obj.result_id)
         if not others.exists():
             return "No other runs share this spec_hash."
-        links = []
-        for other in others:
-            url = f"../{other.result_id}/change/"
-            links.append(f'<a href="{url}">{other.result_id}</a> ({other.status})')
-        return mark_safe("<br>".join(links))
+        return format_html_join('<br>', '<a href="{}">{}</a> ({})',
+                                ((f'../{other.result_id}/change/', other.result_id, other.status)
+                                 for other in others))
     duplicate_specs.short_description = "Other runs with same spec_hash"
 
     def changelist_view(self, request, extra_context=None):
-        stats = TaskRun.objects.aggregate(
+        stats = self.get_queryset(request).aggregate(
             running=Count("result_id", filter=Q(status="RUNNING")),
             failed=Count("result_id", filter=Q(status="FAILED")),
             ready=Count("result_id", filter=Q(status="READY")),
@@ -253,114 +271,34 @@ class TaskRunAdmin(admin.ModelAdmin):
         extra_context['summary_stats'] = summary_html
         return super().changelist_view(request, extra_context=extra_context)
 
-    @admin.action(description="Replay selected tasks (creates new READY runs)")
+    def _request_operation(self, request, queryset, operation):
+        from .operations import OperationError, preflight_task_operations, task_operation
+
+        submitted = 0
+        try:
+            identifiers = preflight_task_operations(queryset, operation)
+            for identifier in identifiers:
+                task_operation(operation, identifier, using=queryset.db)
+                submitted += 1
+        except (OperationError, ValueError) as error:
+            self.message_user(request, str(error), messages.ERROR)
+        self.message_user(request, f'Submitted {submitted} {operation} request(s); inspect current task state.', messages.INFO)
+
+    def has_replay_permission(self, request):
+        return request.user.has_perm('reproq_django.can_replay_taskrun')
+
+    @admin.action(description="Replay selected tasks", permissions=['replay'])
     def replay_tasks(self, request, queryset):
-        count = 0
-        for old_run in queryset:
-            task_path = old_run.task_path or (old_run.spec_json or {}).get("task_path")
-            TaskRun.objects.create(
-                backend_alias=old_run.backend_alias,
-                queue_name=old_run.queue_name,
-                priority=old_run.priority,
-                run_after=None,
-                spec_json=old_run.spec_json,
-                task_path=task_path,
-                spec_hash=old_run.spec_hash,
-                status="READY",
-                errors_json=[],
-                attempts=0,
-                max_attempts=old_run.max_attempts,
-                timeout_seconds=old_run.timeout_seconds
-            )
-            count += 1
-        self.message_user(request, f"Successfully replayed {count} tasks.", messages.SUCCESS)
+        self._request_operation(request, queryset, 'replay')
 
-    @admin.action(description="Retry failed tasks (sets status to READY)")
+    @admin.action(description="Retry selected failed tasks")
     def retry_failed_tasks(self, request, queryset):
-        updated = queryset.filter(status="FAILED").update(status="READY", run_after=timezone.now())
-        self.message_user(request, f"Successfully set {updated} failed tasks to READY.", messages.SUCCESS)
-
-    @admin.action(description="Discard failed tasks (mark as CANCELLED)")
-    def discard_failed_tasks(self, request, queryset):
-        now = timezone.now()
-        updated = queryset.filter(status="FAILED").update(
-            status="CANCELLED",
-            finished_at=now,
-            last_error="Discarded in admin",
-            updated_at=now,
-        )
-        self.message_user(request, f"Discarded {updated} failed task(s).", messages.SUCCESS)
+        self._request_operation(request, queryset.filter(status='FAILED'), 'retry')
 
     @admin.action(description="Cancel selected tasks")
     def cancel_tasks(self, request, queryset):
-        now = timezone.now()
-        running = queryset.filter(status="RUNNING").update(cancel_requested=True, updated_at=now)
-        ready = queryset.filter(status="READY").update(status="CANCELLED", finished_at=now, updated_at=now)
-        self.message_user(
-            request,
-            f"Requested cancellation for {running} running task(s); cancelled {ready} ready task(s).",
-            messages.SUCCESS,
-        )
+        self._request_operation(request, queryset, 'cancel')
 
-    @admin.action(description="Delete selected SUCCESSFUL tasks")
-    def delete_successful_tasks(self, request, queryset):
-        successful = queryset.filter(status="SUCCESSFUL")
-        count = successful.count()
-        successful.delete()
-        self.message_user(request, f"Deleted {count} successful task(s).", messages.SUCCESS)
-
-    @admin.action(description="Create expired-lease test task (for reclaim)")
-    def create_expired_lease_test_task(self, request, queryset):
-        run = self._create_expired_lease_task()
-        self.message_user(
-            request,
-            f"Created expired-lease test task (result_id={run.result_id}).",
-            messages.SUCCESS,
-        )
-
-    def create_expired_lease_view(self, request):
-        run = self._create_expired_lease_task()
-        self.message_user(
-            request,
-            f"Created expired-lease test task (result_id={run.result_id}).",
-            messages.SUCCESS,
-        )
-        return HttpResponseRedirect(reverse("admin:reproq_django_taskrun_changelist"))
-
-    def _create_expired_lease_task(self):
-        spec = {
-            "v": 1,
-            "task_path": "reproq_django.tasks.debug_noop_task",
-            "args": [],
-            "kwargs": {"sleep_seconds": 0},
-            "takes_context": False,
-            "queue_name": "default",
-            "priority": 0,
-            "run_after": None,
-            "exec": {
-                "timeout_seconds": 900,
-                "max_attempts": 3,
-            },
-            "provenance": {
-                "reclaim_test_id": str(uuid.uuid4()),
-            },
-        }
-        spec_hash = spec_hash_for(spec)
-        return TaskRun.objects.create(
-            backend_alias="default",
-            queue_name=spec["queue_name"],
-            priority=spec["priority"],
-            run_after=None,
-            spec_json=spec,
-            task_path=spec["task_path"],
-            spec_hash=spec_hash,
-            status="RUNNING",
-            errors_json=[],
-            attempts=0,
-            max_attempts=spec["exec"]["max_attempts"],
-            timeout_seconds=spec["exec"]["timeout_seconds"],
-            leased_until=timezone.now() - timedelta(minutes=10),
-            leased_by="admin-expired-lease",
-        )
+    def has_delete_permission(self, request, obj=None): return False
 
     def has_add_permission(self, request): return False

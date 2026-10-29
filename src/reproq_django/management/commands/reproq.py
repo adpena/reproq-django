@@ -15,12 +15,15 @@ import importlib.resources
 from datetime import timedelta
 from django.core.management.base import BaseCommand, CommandError
 from django.conf import settings
-from django.db import connection, connections
-from django.db.models import Q
+from django.db import connections
 from django.utils import timezone
 from ...models import PeriodicTask, TaskRun, QueueControl
 from ...db import default_db_alias, parse_result_id, queue_db_aliases
-from ...recurring import sync_recurring_tasks
+from ...recurring import periodic_definition_status, sync_recurring_tasks
+from ...schema_contract import SchemaContractError, require_schema_contract
+from ...schema_adoption import SchemaAdoptionError, adopt_legacy_schema, inspect_legacy_schema
+from ...schema_inspection import SchemaInspectionError
+from ...capabilities import require_worker_capabilities
 
 
 def _add_worker_install_arguments(parser):
@@ -40,40 +43,41 @@ class Command(BaseCommand):
         subparsers = parser.add_subparsers(dest="subcommand", required=True)
 
         # Worker
-        worker_parser = subparsers.add_parser("worker", help="Start the Go worker")
-        worker_parser.add_argument("--config", type=str, default="", help="Path to reproq config file")
-        worker_parser.add_argument("--concurrency", type=int, default=10)
-        worker_parser.add_argument("--queues", type=str, default="", help="Comma-separated queue names")
-        worker_parser.add_argument("--queue", type=str, default="default", help="Deprecated (use --queues)")
-        worker_parser.add_argument("--database", type=str, default="", help="Django database alias for worker DSN")
-        worker_parser.add_argument("--allowed-task-modules", type=str, default="", help="Comma-separated task module allow-list")
-        worker_parser.add_argument("--logs-dir", type=str, default="", help="Directory to persist stdout/stderr logs")
-        worker_parser.add_argument("--payload-mode", type=str, default="", help="Payload mode: stdin|file|inline")
-        worker_parser.add_argument("--metrics-port", type=int, default=0, help="Port to serve Prometheus metrics")
-        worker_parser.add_argument("--metrics-addr", type=str, default="", help="Address to serve health/metrics")
-        worker_parser.add_argument("--metrics-auth-token", type=str, default="", help="Bearer token required for health/metrics")
-        worker_parser.add_argument("--metrics-allow-cidrs", type=str, default="", help="Comma-separated IP/CIDR allow-list")
-        worker_parser.add_argument("--metrics-tls-cert", type=str, default="", help="TLS certificate path for health/metrics")
-        worker_parser.add_argument("--metrics-tls-key", type=str, default="", help="TLS private key path for health/metrics")
-        worker_parser.add_argument("--metrics-tls-client-ca", type=str, default="", help="Client CA bundle to require mTLS for health/metrics")
+        worker_parser = subparsers.add_parser("worker", help="Start the Go worker", allow_abbrev=False)
+        # None means absent for both native call_command kwargs and CLI input.
+        # Go owns ordinary runtime defaults after file/environment overrides.
+        worker_parser.add_argument("--config", type=str, default=None, help="Path to reproq config file")
+        worker_parser.add_argument("--concurrency", type=int, default=None)
+        worker_parser.add_argument("--queues", type=str, default=None, help="Comma-separated queue names")
+        worker_parser.add_argument("--database", type=str, default=None, help="Django database alias for worker DSN")
+        worker_parser.add_argument("--allowed-task-modules", type=str, default=None, help="Comma-separated task module allow-list")
+        worker_parser.add_argument("--logs-dir", type=str, default=None, help="Directory to persist stdout/stderr logs")
+        worker_parser.add_argument("--payload-mode", type=str, default=None, help="Payload mode: stdin|file|inline")
+        worker_parser.add_argument("--metrics-port", type=int, default=None, help="Port to serve Prometheus metrics")
+        worker_parser.add_argument("--metrics-addr", type=str, default=None, help="Address to serve health/metrics")
+        worker_parser.add_argument("--metrics-auth-token", type=str, default=None, help="Bearer token required for health/metrics")
+        worker_parser.add_argument("--metrics-allow-cidrs", type=str, default=None, help="Comma-separated IP/CIDR allow-list")
+        worker_parser.add_argument("--metrics-tls-cert", type=str, default=None, help="TLS certificate path for health/metrics")
+        worker_parser.add_argument("--metrics-tls-key", type=str, default=None, help="TLS private key path for health/metrics")
+        worker_parser.add_argument("--metrics-tls-client-ca", type=str, default=None, help="Client CA bundle to require mTLS for health/metrics")
         worker_parser.add_argument("--metrics-auth-limit", type=int, default=None, help="Unauthorized request limit per window")
-        worker_parser.add_argument("--metrics-auth-window", type=str, default="", help="Rate limit window (e.g. 1m)")
+        worker_parser.add_argument("--metrics-auth-window", type=str, default=None, help="Rate limit window (e.g. 1m)")
         worker_parser.add_argument("--metrics-auth-max-entries", type=int, default=None, help="Max tracked hosts for auth rate limiting")
 
         # Beat
         beat_parser = subparsers.add_parser("beat", help="Start the periodic task scheduler (beat)")
-        beat_parser.add_argument("--config", type=str, default="", help="Path to reproq config file")
-        beat_parser.add_argument("--interval", type=str, default="30s")
-        beat_parser.add_argument("--once", action="store_true", help="Enqueue due periodic tasks once and exit")
-        beat_parser.add_argument("--database", type=str, default="", help="Django database alias for beat DSN")
+        beat_parser.add_argument("--config", type=str, default=None, help="Path to reproq config file")
+        beat_parser.add_argument("--interval", type=str, default=None)
+        beat_parser.add_argument("--once", action="store_true", default=None, help="Enqueue due periodic tasks once and exit")
+        beat_parser.add_argument("--database", type=str, default=None, help="Django database alias for beat DSN")
 
         schedule_parser = subparsers.add_parser(
             "schedule",
             help="Enqueue due periodic tasks once and exit (cron-friendly)",
         )
-        schedule_parser.add_argument("--config", type=str, default="", help="Path to reproq config file")
-        schedule_parser.add_argument("--interval", type=str, default="30s")
-        schedule_parser.add_argument("--database", type=str, default="", help="Django database alias for beat DSN")
+        schedule_parser.add_argument("--config", type=str, default=None, help="Path to reproq config file")
+        schedule_parser.add_argument("--interval", type=str, default=None)
+        schedule_parser.add_argument("--database", type=str, default=None, help="Django database alias for beat DSN")
 
         # PG Cron
         pgcron_parser = subparsers.add_parser(
@@ -88,7 +92,7 @@ class Command(BaseCommand):
         pgcron_parser.add_argument(
             "--remove",
             action="store_true",
-            help="Remove pg_cron jobs and helper function",
+            help="Remove exact known owned pg_cron jobs (no function or extension DDL)",
         )
         pgcron_parser.add_argument(
             "--prefix",
@@ -109,7 +113,13 @@ class Command(BaseCommand):
         pgcron_parser.add_argument("--database", type=str, default="", help="Django database alias for pg_cron")
 
         # Migrate
-        subparsers.add_parser("migrate-worker", help="Apply Go worker SQL optimizations")
+        migrate_parser = subparsers.add_parser("migrate-worker", help="Apply committed ReproQ Django migrations")
+        migrate_parser.add_argument("--database", type=str, default="", help="Django queue database alias")
+        adoption_parser = subparsers.add_parser("adopt-schema", help="Explicitly adopt a verified known legacy schema")
+        adoption_parser.add_argument("--database", type=str, default="", help="Django queue database alias")
+        adoption_parser.add_argument("--inspect", action="store_true", help="Read catalog/history without adopting")
+        adoption_parser.add_argument("--expected-catalog-sha256", type=str, default="")
+        adoption_parser.add_argument("--audit-output", type=str, default="", help="New JSON audit receipt file")
 
         # Check
         subparsers.add_parser("check", help="Verify configuration")
@@ -121,11 +131,12 @@ class Command(BaseCommand):
         # Init
         init_parser = subparsers.add_parser("init", help="Bootstrap Reproq in the current project")
         init_parser.add_argument("--config", type=str, default="", help="Path to config file to write")
-        init_parser.add_argument("--format", choices=["yaml", "toml"], default="yaml", help="Config format")
+        init_parser.add_argument("--format", choices=["yaml", "toml"], default="toml", help="Config format")
         init_parser.add_argument("--force", action="store_true", help="Overwrite existing config file")
         init_parser.add_argument("--skip-install", action="store_true", help="Skip worker binary install")
         init_parser.add_argument("--skip-migrate", action="store_true", help="Skip Django migrations")
-        init_parser.add_argument("--skip-worker-migrate", action="store_true", help="Skip worker SQL optimizations")
+        init_parser.add_argument("--skip-worker-migrate", action="store_true", help="Skip the separate ReproQ migration step")
+        init_parser.add_argument("--database", type=str, default="", help="Django queue database alias")
         _add_worker_install_arguments(init_parser)
 
         # Stats
@@ -136,16 +147,11 @@ class Command(BaseCommand):
         status_parser.add_argument("--database", type=str, default="", help="Django database alias")
         status_parser.add_argument("--all-databases", action="store_true", help="Aggregate across configured databases")
 
-        # Stress Test
-        stress_parser = subparsers.add_parser("stress-test", help="Enqueue a large number of tasks for benchmarking")
-        stress_parser.add_argument("--count", type=int, default=100, help="Number of tasks to enqueue")
-        stress_parser.add_argument("--sleep", type=float, default=0, help="Time each task should sleep")
-        stress_parser.add_argument("--bulk", action="store_true", help="Use bulk_enqueue")
-
         # Doctor
         doctor_parser = subparsers.add_parser("doctor", help="Validate configuration, schema, and worker binary")
         doctor_parser.add_argument("--config", type=str, default="", help="Path to reproq config file")
         doctor_parser.add_argument("--strict", action="store_true", help="Exit with error on warnings")
+        doctor_parser.add_argument("--database", type=str, default="", help="Django queue database alias")
 
         # Config
         config_parser = subparsers.add_parser("config", help="Show effective worker/beat configuration")
@@ -189,10 +195,17 @@ class Command(BaseCommand):
         )
         sync_parser.add_argument("--database", type=str, default="", help="Django database alias")
         sync_parser.add_argument(
-            "--clear-missing",
+            "--reset-schedule-state",
             action="store_true",
-            help="Disable schedules not defined in code",
+            help="Explicitly reset existing enabled and next-run state to code defaults",
         )
+
+        reconcile_parser = subparsers.add_parser(
+            "reconcile-periodic", help="Canonicalize named legacy periodic definitions",
+        )
+        reconcile_parser.add_argument("--database", default="")
+        reconcile_parser.add_argument("--name", action="append", required=True)
+        reconcile_parser.add_argument("--dry-run", action="store_true")
 
         # Queue controls
         pause_parser = subparsers.add_parser("pause-queue", help="Pause a queue")
@@ -220,7 +233,7 @@ class Command(BaseCommand):
         # Upgrade
         upgrade_parser = subparsers.add_parser("upgrade", help="Upgrade the Go worker binary")
         _add_worker_install_arguments(upgrade_parser)
-        upgrade_parser.add_argument("--skip-worker-migrate", action="store_true", help="Skip worker SQL optimizations")
+        upgrade_parser.add_argument("--skip-worker-migrate", action="store_true", help="Skip committed ReproQ migrations")
 
         # systemd
         systemd_parser = subparsers.add_parser("systemd", help="Generate systemd service files")
@@ -306,38 +319,15 @@ class Command(BaseCommand):
         prune_workers.add_argument("--database", type=str, default="", help="Django database alias")
         prune_workers.add_argument("--all-databases", action="store_true", help="Prune across configured databases")
 
-        prune_successful = subparsers.add_parser(
-            "prune-successful",
-            help="Delete successful task runs older than a cutoff",
-        )
-        prune_successful.add_argument(
-            "--older-than",
-            default="7d",
-            help="Delete tasks older than this (e.g., 7d, 30d)",
-        )
-        prune_successful.add_argument(
-            "--limit",
-            type=int,
-            default=0,
-            help="Maximum number of tasks to delete (0 = no limit)",
-        )
-        prune_successful.add_argument(
-            "--dry-run",
-            action="store_true",
-            help="Show how many tasks would be deleted",
-        )
-        prune_successful.add_argument("--database", type=str, default="", help="Django database alias")
-        prune_successful.add_argument("--all-databases", action="store_true", help="Prune across configured databases")
-
         prune_parser = subparsers.add_parser(
             "prune",
-            help="Delete task runs by status and age",
+            help="Delete terminal task history by status and age",
         )
         prune_parser.add_argument(
             "--statuses",
             type=str,
             default="SUCCESSFUL,FAILED,CANCELLED",
-            help="Comma-separated statuses to delete",
+            help="Comma-separated terminal statuses (SUCCESSFUL,FAILED,CANCELLED)",
         )
         prune_parser.add_argument(
             "--older-than",
@@ -382,18 +372,20 @@ class Command(BaseCommand):
             self.run_stats(options)
         elif subcommand == "status":
             self.run_stats(options)
-        elif subcommand == "stress-test":
-            self.run_stress_test(options)
         elif subcommand == "systemd":
             self.run_systemd(options)
         elif subcommand == "install":
             self.run_install(options)
         elif subcommand == "migrate-worker":
             self.run_migrate(options)
+        elif subcommand == "adopt-schema":
+            self.run_adopt_schema(options)
         elif subcommand == "allowlist":
             self.run_allowlist(options)
         elif subcommand == "sync-recurring":
             self.run_sync_recurring(options)
+        elif subcommand == "reconcile-periodic":
+            self.run_reconcile_periodic(options)
         elif subcommand == "pause-queue":
             self.run_pause_queue(options)
         elif subcommand == "resume-queue":
@@ -406,8 +398,6 @@ class Command(BaseCommand):
             self.run_reclaim(options)
         elif subcommand == "prune-workers":
             self.run_prune_workers(options)
-        elif subcommand == "prune-successful":
-            self.run_prune_successful(options)
         elif subcommand == "prune":
             self.run_prune(options)
         elif subcommand == "pg-cron":
@@ -421,22 +411,11 @@ class Command(BaseCommand):
     def run_check(self):
         self.stdout.write("Checking Reproq configuration...")
         failed = False
-        low_memory = os.getenv("LOW_MEMORY_MODE", "").strip().lower() in {
-            "1",
-            "true",
-            "t",
-            "yes",
-            "y",
-            "on",
-        }
-        beat_cmd_env = os.getenv("REPROQ_BEAT_CMD", "")
-        beat_cmd_normalized = beat_cmd_env.strip().lower()
-        beat_disabled = beat_cmd_normalized in {"", "0", "false", "off", "disabled", "none"}
         db_alias = default_db_alias()
         worker_bin, resolved_bin, exists = self._resolve_worker_bin()
         self.stdout.write(f"Resolved worker binary: {resolved_bin or worker_bin}")
         try:
-            version = subprocess.check_output([worker_bin, "--version"]).decode().strip()
+            version = require_worker_capabilities(worker_bin)["worker_version"]
             self.stdout.write(self.style.SUCCESS(f"✅ Worker binary: {version}"))
         except Exception as e:
             self.stderr.write(self.style.ERROR(f"❌ Worker binary invalid: {e}"))
@@ -444,11 +423,9 @@ class Command(BaseCommand):
                 self.stderr.write(self.style.ERROR(f"   Resolved path: {resolved_bin}"))
             failed = True
 
-        dsn = self.get_dsn(None if db_alias == "default" else db_alias)
+        dsn = self.get_dsn(db_alias)
         if dsn:
-            use_env = bool(os.environ.get("DATABASE_URL")) and db_alias == "default"
-            source = "DATABASE_URL" if use_env else "DATABASES"
-            self.stdout.write(self.style.SUCCESS(f"✅ Database DSN detected ({source})."))
+            self.stdout.write(self.style.SUCCESS("✅ Database DSN detected (Django DATABASES)."))
             self.stdout.write(f"DSN: {self._mask_dsn(dsn)}")
         else:
             self.stderr.write(self.style.ERROR("❌ Database DSN not detected."))
@@ -468,49 +445,18 @@ class Command(BaseCommand):
                 self.stderr.write(self.style.ERROR("❌ Database schema missing (run migrate)."))
                 failed = True
 
-            if low_memory:
-                self.stdout.write(
-                    self.style.WARNING(
-                        "LOW_MEMORY_MODE enabled; reproq-beat is disabled."
-                    )
-                )
-                if conn.vendor != "postgresql":
-                    self.stdout.write(
-                        self.style.WARNING(
-                            "Periodic schedules require pg_cron; unavailable on this database."
-                        )
-                    )
-                elif self._pg_cron_available(cursor):
-                    self.stdout.write(
-                        self.style.WARNING(
-                            "Periodic schedules rely on pg_cron in low-memory mode."
-                        )
-                    )
-                else:
-                    self.stdout.write(
-                        self.style.WARNING(
-                            "Periodic schedules disabled: pg_cron extension not available."
-                        )
-                    )
-            elif beat_disabled:
-                self.stdout.write(
-                    self.style.WARNING(
-                        "reproq-beat disabled via REPROQ_BEAT_CMD; periodic schedules require pg_cron."
-                    )
-                )
-                if conn.vendor != "postgresql":
-                    self.stdout.write(
-                        self.style.WARNING(
-                            "pg_cron unavailable on this database; periodic schedules will not run."
-                        )
-                    )
-                elif not self._pg_cron_available(cursor):
-                    self.stdout.write(
-                        self.style.WARNING(
-                            "pg_cron extension not available; periodic schedules will not run."
-                        )
-                    )
-        
+        try:
+            require_schema_contract(conn)
+        except SchemaContractError as exc:
+            self.stderr.write(self.style.ERROR(str(exc)))
+            failed = True
+
+        if not failed:
+            problems = self._periodic_registration_problems(conn.alias)
+            for problem in problems:
+                self.stderr.write(self.style.ERROR(problem))
+            failed = bool(problems)
+
         if failed:
             raise CommandError("Reproq check failed.")
 
@@ -526,7 +472,7 @@ class Command(BaseCommand):
         if config_path:
             created = self._ensure_config_file(
                 config_path,
-                options.get("format", "yaml"),
+                options.get("format", "toml"),
                 options.get("force", False),
             )
             if created:
@@ -538,16 +484,19 @@ class Command(BaseCommand):
             self.run_install(options)
 
         if not options.get("skip_worker_migrate"):
-            self.run_migrate()
+            self.run_migrate(options)
 
         if not options.get("skip_migrate"):
             from django.core.management import call_command
-            call_command("migrate")
+            # --database selects the queue database, not every business app.
+            call_command("migrate", database="default", interactive=False)
 
         self.stdout.write(self.style.MIGRATE_HEADING("\n✨ Reproq is ready!"))
 
     def run_doctor(self, options):
         strict = options.get("strict", False)
+        db_alias = self._resolve_db_alias(options)
+        conn = connections[db_alias]
         warnings = []
         errors = []
 
@@ -566,7 +515,7 @@ class Command(BaseCommand):
         else:
             self.stdout.write(self.style.SUCCESS("✅ 'reproq_django' is in INSTALLED_APPS."))
 
-        config_path = self._resolve_config_path(options.get("config"), True)
+        config_path = self._resolve_config_path(options.get("config"))
         file_config = None
         if config_path:
             if not os.path.exists(config_path):
@@ -589,10 +538,9 @@ class Command(BaseCommand):
             fail(error)
 
         effective, sources = self._effective_config(file_config, env_config)
-        if not config_path:
-            settings_dsn = self.get_dsn()
-            if settings_dsn and not effective.get("dsn"):
-                self._apply_settings_dsn(effective, sources, settings_dsn, "settings")
+        settings_dsn = self.get_dsn(db_alias)
+        if settings_dsn:
+            self._apply_settings_dsn(effective, sources, settings_dsn, "settings")
 
         worker_dsn = self._resolve_effective_dsn(effective, "worker")
         if worker_dsn:
@@ -607,6 +555,17 @@ class Command(BaseCommand):
         else:
             warn("Beat DSN missing (periodic tasks will not run).")
 
+        expected_dsn = self.get_dsn(db_alias)
+        for scope, dsn in [("worker", worker_dsn), ("beat", beat_dsn)]:
+            if not dsn:
+                continue
+            try:
+                matches = expected_dsn and self._dsn_target(dsn) == self._dsn_target(expected_dsn)
+            except Exception:
+                matches = False
+            if not matches:
+                fail(f"{scope.capitalize()} DSN does not match selected queue database alias {db_alias!r}.")
+
         worker_bin, resolved_bin, exists = self._resolve_worker_bin()
         if not exists:
             fail(
@@ -615,7 +574,7 @@ class Command(BaseCommand):
             )
         else:
             try:
-                version = subprocess.check_output([worker_bin, "--version"]).decode().strip()
+                version = require_worker_capabilities(worker_bin)["worker_version"]
                 self.stdout.write(self.style.SUCCESS(f"✅ Worker binary: {version}"))
             except Exception as exc:
                 fail(f"Worker binary failed version check: {exc}")
@@ -623,13 +582,13 @@ class Command(BaseCommand):
                     self.stderr.write(self.style.ERROR(f"Resolved path: {resolved_bin}"))
 
         try:
-            connection.ensure_connection()
+            conn.ensure_connection()
             self.stdout.write(self.style.SUCCESS("✅ Database connection ok."))
         except Exception as exc:
             fail(f"Database connection failed: {exc}")
         else:
-            with connection.cursor() as cursor:
-                tables = set(connection.introspection.table_names(cursor))
+            with conn.cursor() as cursor:
+                tables = set(conn.introspection.table_names(cursor))
             required_tables = {
                 "task_runs",
                 "periodic_tasks",
@@ -642,10 +601,17 @@ class Command(BaseCommand):
             if missing:
                 fail(
                     "Reproq schema missing tables: "
-                    f"{', '.join(missing)} (run reproq migrate-worker + migrate)."
+                    f"{', '.join(missing)} (apply committed Django migrations)."
                 )
             else:
                 self.stdout.write(self.style.SUCCESS("✅ Reproq schema present."))
+                try:
+                    require_schema_contract(conn)
+                except SchemaContractError as exc:
+                    fail(str(exc))
+                else:
+                    for problem in self._periodic_registration_problems(db_alias):
+                        fail(problem)
 
         allowlist = effective.get("worker", {}).get("allowed_task_modules", [])
         if not allowlist:
@@ -673,7 +639,7 @@ class Command(BaseCommand):
         self.stdout.write(self.style.SUCCESS("✨ Doctor completed with no blocking issues."))
 
     def run_config(self, options):
-        config_path = self._resolve_config_path(options.get("config"), True)
+        config_path = self._resolve_config_path(options.get("config"))
         if config_path and not os.path.exists(config_path):
             raise CommandError(f"Config file not found: {config_path}")
 
@@ -687,10 +653,9 @@ class Command(BaseCommand):
             raise CommandError("; ".join(env_errors))
 
         effective, sources = self._effective_config(file_config, env_config)
-        if not config_path:
-            settings_dsn = self.get_dsn()
-            if settings_dsn and not effective.get("dsn"):
-                self._apply_settings_dsn(effective, sources, settings_dsn, "settings")
+        settings_dsn = self.get_dsn()
+        if settings_dsn:
+            self._apply_settings_dsn(effective, sources, settings_dsn, "settings")
 
         mode = options.get("mode", "worker")
         view = self._select_config_view(effective, mode)
@@ -768,32 +733,23 @@ class Command(BaseCommand):
                         with open(tmp_path, "wb") as destination:
                             shutil.copyfileobj(response, destination)
                 except Exception as error:
-                    if expected is not None:
-                        raise CommandError("Pinned worker download failed; source fallback is disabled.") from error
-                    self.stdout.write(self.style.WARNING(f"Download failed: {error}"))
+                    raise CommandError("Worker download failed; source fallback is disabled. Use --build --source explicitly.") from error
                 else:
                     # Integrity errors must never enter the source-build fallback.
                     checksum = expected or self._download_checksum(url) or self._release_checksum(tag, bin_name)
                     success = True
 
             if not success:
-                source_path = options.get("source") or os.path.join(
-                    os.path.dirname(
-                        os.path.dirname(
-                            os.path.dirname(
-                                os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-                            )
-                        )
-                    ),
-                    "reproq-worker",
-                )
-                if not os.path.isdir(source_path):
-                    raise CommandError(f"Worker source not found: {source_path}")
-                self.stdout.write(f"Building from local source: {source_path}...")
+                from ...worker_install import build_verified_source
+                source_path = options.get("source")
+                if not source_path:
+                    raise CommandError("Source builds require an explicit --source worker checkout")
+                self.stdout.write(f"Building canonical worker artifacts from: {source_path}")
                 try:
-                    subprocess.run(["go", "build", "-tags", "prod", "-o", tmp_path, "./cmd/reproq"], cwd=source_path, check=True)
+                    built_digest = build_verified_source(source_path, tmp_path, system=system, architecture=arch)
                 except Exception as error:
-                    raise CommandError(f"Worker source build failed: {error}") from error
+                    raise CommandError(f"Canonical worker source build failed: {error}") from error
+                checksum = expected or built_digest
 
             actual = self._sha256_file(tmp_path)
             if checksum is not None:
@@ -805,7 +761,7 @@ class Command(BaseCommand):
             if system != "windows":
                 os.chmod(tmp_path, 0o755)
             try:
-                subprocess.check_output([tmp_path, "--version"], timeout=30)
+                require_worker_capabilities(tmp_path)
                 os.replace(tmp_path, target_path)
             except Exception as error:
                 raise CommandError(f"Worker verification or publication failed: {error}") from error
@@ -995,82 +951,36 @@ WantedBy=timers.target
         return [alias or default_db_alias()]
 
     def run_reclaim(self, options):
+        from ...schema_contract import require_schema_contract
+
         aliases = self._resolve_db_aliases(options)
-        now = timezone.now()
-        older_than = self._parse_duration(options["older_than"])
-        cutoff = now - older_than
-
-        lease_filter = Q(leased_until__lt=cutoff)
-        if options["include_null_lease"]:
-            lease_filter |= Q(leased_until__isnull=True)
-
+        worker_bin, resolved_bin, exists = self._resolve_worker_bin()
+        if not exists:
+            raise CommandError("Install the compatible Go worker before reclaiming task leases")
+        try:
+            require_worker_capabilities(worker_bin)
+        except ValueError as error:
+            raise CommandError(str(error)) from error
         for alias in aliases:
-            queryset = TaskRun.objects.using(alias).filter(
-                status="RUNNING",
-                cancel_requested=False,
-            ).filter(lease_filter)
-
-            if options["limit"] and options["limit"] > 0:
-                ids = list(
-                    queryset.order_by("leased_until", "result_id")
-                    .values_list("result_id", flat=True)[: options["limit"]]
-                )
-                queryset = TaskRun.objects.using(alias).filter(result_id__in=ids)
-
-            count = queryset.count()
-            prefix = f"[{alias}] " if len(aliases) > 1 else ""
+            require_schema_contract(connections[alias])
+            dsn = self.get_dsn(alias)
+            if not dsn:
+                raise CommandError(f"PostgreSQL DSN is required for queue alias {alias!r}")
+            arguments = [worker_bin, "reclaim",
+                         "--action", options["action"], "--older-than", f"{int(self._parse_duration(options['older_than']).total_seconds())}s",
+                         "--limit", str(options["limit"] or 0)]
+            if options["include_null_lease"]:
+                arguments.append("--include-null-lease")
             if options["dry_run"]:
-                self.stdout.write(
-                    self.style.WARNING(f"{prefix}Dry run: {count} task(s) match reclaim criteria.")
-                )
-                continue
-
-            if count == 0:
-                self.stdout.write(self.style.SUCCESS(f"{prefix}No expired leases found."))
-                continue
-
-            action = options["action"]
-            if action == "requeue":
-                updated = queryset.update(
-                    status="READY",
-                    run_after=now,
-                    leased_until=None,
-                    leased_by=None,
-                    started_at=None,
-                    finished_at=None,
-                )
-                self.stdout.write(self.style.SUCCESS(f"{prefix}Requeued {updated} task(s)."))
-                continue
-
-            failures = 0
-            for run in queryset:
-                errors = list(run.errors_json or [])
-                errors.append(
-                    {
-                        "at": now.isoformat(),
-                        "kind": "reclaim",
-                        "message": "Lease expired; marking task failed.",
-                    }
-                )
-                run.status = "FAILED"
-                run.finished_at = now
-                run.last_attempted_at = now
-                run.leased_until = None
-                run.leased_by = None
-                run.errors_json = errors
-                run.save(
-                    update_fields=[
-                        "status",
-                        "finished_at",
-                        "last_attempted_at",
-                        "leased_until",
-                        "leased_by",
-                        "errors_json",
-                    ]
-                )
-                failures += 1
-
-            self.stdout.write(self.style.SUCCESS(f"{prefix}Marked {failures} task(s) failed."))
+                arguments.append("--dry-run")
+            self.stdout.write(f"Reclaiming expired leases on queue database {alias}")
+            try:
+                subprocess.run(arguments, check=True, env={**os.environ, "REPROQ_DATABASE_URL": dsn})
+            except subprocess.CalledProcessError as error:
+                # CalledProcessError's default text includes the private DSN.
+                raise CommandError(f"Go reclaim failed on {alias} (exit {error.returncode})") from None
+            except OSError as error:
+                raise CommandError(f"Cannot start the compatible Go reclaimer: {error}") from None
 
     def run_prune_workers(self, options):
         from reproq_django.models import Worker
@@ -1086,62 +996,84 @@ WantedBy=timers.target
             queryset.delete()
             self.stdout.write(self.style.SUCCESS(f"{prefix}Deleted {count} stale worker(s)."))
 
-    def run_prune_successful(self, options):
-        from reproq_django.models import TaskRun
-        cutoff = timezone.now() - self._parse_duration(options["older_than"])
-        aliases = self._resolve_db_aliases(options)
-        for alias in aliases:
-            queryset = TaskRun.objects.using(alias).filter(status="SUCCESSFUL", finished_at__lt=cutoff)
-            if options["limit"] and options["limit"] > 0:
-                ids = list(
-                    queryset.order_by("finished_at", "result_id")
-                    .values_list("result_id", flat=True)[: options["limit"]]
-                )
-                queryset = TaskRun.objects.using(alias).filter(result_id__in=ids)
-            count = queryset.count()
-            prefix = f"[{alias}] " if len(aliases) > 1 else ""
-            if options["dry_run"]:
-                self.stdout.write(self.style.WARNING(f"{prefix}Dry run: {count} task(s) would be deleted."))
-                continue
-            queryset.delete()
-            self.stdout.write(self.style.SUCCESS(f"{prefix}Deleted {count} successful task(s)."))
-
     def run_prune(self, options):
-        from reproq_django.models import TaskRun
+        from ...operations import OperationError, prune_history
 
-        cutoff = timezone.now() - self._parse_duration(options["older_than"])
         statuses = [s.strip().upper() for s in options["statuses"].split(",") if s.strip()]
+        if not statuses or not set(statuses).issubset({"SUCCESSFUL", "FAILED", "CANCELLED"}):
+            raise CommandError("Prune accepts only terminal SUCCESSFUL, FAILED or CANCELLED history")
+        limit = options["limit"]
+        if type(limit) is not int or limit < 0:
+            raise CommandError("Prune limit must be nonnegative (0 = no limit)")
+        try:
+            age = self._parse_duration(options["older_than"])
+        except (ValueError, OverflowError) as error:
+            raise CommandError('Invalid history retention age') from error
         field = options.get("field") or "finished_at"
         aliases = self._resolve_db_aliases(options)
 
         for alias in aliases:
-            queryset = TaskRun.objects.using(alias).filter(status__in=statuses)
-            queryset = queryset.filter(**{f"{field}__lt": cutoff})
-            if options["limit"] and options["limit"] > 0:
-                ids = list(
-                    queryset.order_by(field, "result_id")
-                    .values_list("result_id", flat=True)[: options["limit"]]
-                )
-                queryset = TaskRun.objects.using(alias).filter(result_id__in=ids)
-            count = queryset.count()
+            try:
+                count = prune_history(using=alias, statuses=statuses, older_than=age,
+                                      field=field, limit=limit, dry_run=options['dry_run'])
+            except (OperationError, ValueError) as error:
+                raise CommandError(str(error)) from error
             prefix = f"[{alias}] " if len(aliases) > 1 else ""
             if options["dry_run"]:
-                self.stdout.write(self.style.WARNING(f"{prefix}Dry run: {count} task(s) would be deleted."))
+                self.stdout.write(self.style.WARNING(f"{prefix}Dry run: up to {count} terminal task(s) currently eligible."))
                 continue
-            queryset.delete()
             self.stdout.write(self.style.SUCCESS(f"{prefix}Deleted {count} task(s)."))
 
     def run_sync_recurring(self, options):
         alias = options.get("database") or None
         count = sync_recurring_tasks(
             using=alias,
-            clear_missing=options.get("clear_missing", False),
+            reset_schedule_state=options.get("reset_schedule_state", False),
         )
         if count == 0:
             self.stdout.write(self.style.WARNING("No recurring tasks found."))
             return
         target = alias or "auto"
         self.stdout.write(self.style.SUCCESS(f"Synced {count} recurring task(s) ({target})."))
+
+    def run_reconcile_periodic(self, options):
+        from django.db import transaction
+        from ...recurring import periodic_arguments, register_periodic
+        from ...schema_contract import require_schema_contract
+        from ...specs import read_periodic_spec
+
+        alias = self._resolve_db_alias(options)
+        require_schema_contract(connections[alias])
+        names = sorted(set(options["name"]))
+        with transaction.atomic(using=alias):
+            rows = list(PeriodicTask.objects.using(alias).select_for_update().filter(name__in=names))
+            if {row.name for row in rows} != set(names):
+                raise CommandError("One or more named periodic definitions do not exist; nothing changed")
+            for row in rows:
+                if row.spec_version == 1:
+                    try:
+                        spec = read_periodic_spec(row)
+                    except ValueError as error:
+                        raise CommandError('Stored canonical intent is invalid; inspect it explicitly before reconciliation') from error
+                    payload = spec.payload
+                    if row.payload_json != {'args': payload['args'], 'kwargs': payload['kwargs']}:
+                        raise CommandError('Canonical intent and stored projections disagree; no automatic repair was attempted')
+                    self.stdout.write(f'{row.name}: already canonical; execution and operator intent preserved')
+                    continue
+                try:
+                    args, kwargs = periodic_arguments(row.payload_json, spec_version=row.spec_version)
+                except ValueError as error:
+                    raise CommandError(str(error)) from error
+                registered = register_periodic(
+                    name=row.name, schedule=row.cron_expr, task=row.task_path,
+                    args=args, kwargs=kwargs, using=alias, queue_name=row.queue_name,
+                    priority=row.priority, max_attempts=row.max_attempts,
+                    concurrency_key=row.concurrency_key, concurrency_limit=row.concurrency_limit,
+                )
+                self.stdout.write(f"{row.name}: canonical spec v{registered.spec_version} {registered.canonical_spec_hash}")
+            if options.get("dry_run"):
+                transaction.set_rollback(True, using=alias)
+        self.stdout.write("Dry run rolled back" if options.get("dry_run") else "Named definitions reconciled; operator schedule state preserved")
 
     def run_pause_queue(self, options):
         alias = self._resolve_db_alias(options)
@@ -1177,360 +1109,55 @@ WantedBy=timers.target
         )
         self.stdout.write(self.style.SUCCESS(f"Resumed queue {queue} ({alias})."))
 
-    def _backfill_task_path(self, batch_size=1000, db_alias: str | None = None):
-        conn = connection if db_alias is None else connections[db_alias]
-        if conn.vendor != "postgresql":
-            return
-
-        self.stdout.write("Backfilling task_path in batches...")
-        while True:
-            with conn.cursor() as cursor:
-                cursor.execute(
-                    """
-                    WITH candidates AS (
-                        SELECT result_id
-                        FROM task_runs
-                        WHERE task_path IS NULL
-                          AND NULLIF(spec_json->>'task_path', '') IS NOT NULL
-                        LIMIT %s
-                    )
-                    UPDATE task_runs
-                    SET task_path = spec_json->>'task_path'
-                    WHERE result_id IN (SELECT result_id FROM candidates)
-                    RETURNING 1;
-                    """,
-                    [batch_size],
-                )
-                updated = cursor.fetchall()
-            if not updated:
-                break
-
     def run_migrate(self, options=None):
+        from django.core.management import call_command
+        from django.db.migrations.recorder import MigrationRecorder
+        from ...schema_adoption import BASELINE, COVERED_REPLACEMENTS
+
         db_alias = self._resolve_db_alias(options)
         conn = connections[db_alias]
-        # Go specific optimizations (e.g. creating extensions)
-        self.stdout.write(f"Applying worker-specific optimizations ({db_alias})...")
-        with conn.cursor() as cursor:
+        if conn.vendor == "postgresql":
+            from ..._schema_v1_catalog import require_public_relations_v1
+
             try:
-                cursor.execute("CREATE EXTENSION IF NOT EXISTS pgcrypto;")
-                self.stdout.write(self.style.SUCCESS("✅ pgcrypto extension enabled."))
-            except Exception as e:
-                self.stderr.write(self.style.WARNING(f"⚠️ Could not enable pgcrypto: {e}"))
-        with conn.cursor() as cursor:
-            tables = set(conn.introspection.table_names(cursor))
-        required_tables = {"task_runs", "periodic_tasks", "reproq_workers", "rate_limits", "workflow_runs", "reproq_queue_controls"}
-        missing_tables = sorted(required_tables - tables)
-        ensure_pre_statements = [
-            """
-            ALTER TABLE task_runs
-            ADD COLUMN IF NOT EXISTS last_error TEXT;
-            """,
-            """
-            ALTER TABLE task_runs
-            ADD COLUMN IF NOT EXISTS failed_at TIMESTAMPTZ;
-            """,
-            """
-            ALTER TABLE task_runs
-            ADD COLUMN IF NOT EXISTS task_path TEXT;
-            """,
-            """
-            ALTER TABLE task_runs
-            ADD COLUMN IF NOT EXISTS metadata_json JSONB NOT NULL DEFAULT '{}'::jsonb;
-            """,
-            """
-            ALTER TABLE task_runs
-            ADD COLUMN IF NOT EXISTS concurrency_key TEXT;
-            """,
-            """
-            ALTER TABLE task_runs
-            ADD COLUMN IF NOT EXISTS concurrency_limit INTEGER NOT NULL DEFAULT 0;
-            """,
-            """
-            ALTER TABLE periodic_tasks
-            ADD COLUMN IF NOT EXISTS concurrency_key TEXT;
-            """,
-            """
-            ALTER TABLE periodic_tasks
-            ADD COLUMN IF NOT EXISTS concurrency_limit INTEGER NOT NULL DEFAULT 0;
-            """,
-        ]
-        ensure_post_statements = [
-            """
-            CREATE OR REPLACE FUNCTION reproq_task_path_from_spec()
-            RETURNS trigger AS $$
-            BEGIN
-                IF NEW.task_path IS NULL OR NEW.task_path = '' THEN
-                    NEW.task_path := NEW.spec_json->>'task_path';
-                END IF;
-                RETURN NEW;
-            END;
-            $$ LANGUAGE plpgsql;
-            """,
-            """
-            DROP TRIGGER IF EXISTS trg_task_runs_task_path ON task_runs;
-            """,
-            """
-            CREATE TRIGGER trg_task_runs_task_path
-            BEFORE INSERT OR UPDATE OF spec_json, task_path ON task_runs
-            FOR EACH ROW
-            EXECUTE FUNCTION reproq_task_path_from_spec();
-            """,
-            """
-            DO $$
-            BEGIN
-                IF NOT EXISTS (
-                    SELECT 1 FROM pg_constraint WHERE conname = 'task_runs_task_path_not_empty'
-                ) THEN
-                    ALTER TABLE task_runs
-                    ADD CONSTRAINT task_runs_task_path_not_empty CHECK (task_path IS NOT NULL AND task_path <> '') NOT VALID;
-                END IF;
-            END $$;
-            """,
-            """
-            CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_task_runs_failed_at
-            ON task_runs (failed_at)
-            WHERE status = 'FAILED';
-            """,
-            """
-            CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_task_runs_task_path
-            ON task_runs (task_path);
-            """,
-            """
-            CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_task_runs_claim_due
-            ON task_runs (queue_name, COALESCE(run_after, '-infinity'::timestamptz), priority DESC, enqueued_at ASC)
-            WHERE status = 'READY';
-            """,
-            """
-            CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_task_runs_concurrency_active
-            ON task_runs (concurrency_key, leased_until)
-            WHERE status = 'RUNNING' AND concurrency_key IS NOT NULL;
-            """,
-            """
-            CREATE TABLE IF NOT EXISTS reproq_queue_controls (
-                queue_name TEXT PRIMARY KEY,
-                paused BOOLEAN NOT NULL DEFAULT FALSE,
-                paused_at TIMESTAMPTZ,
-                reason TEXT,
-                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-            );
-            """,
-        ]
-        if not missing_tables:
-            self.stdout.write(self.style.SUCCESS("✅ Reproq schema already present."))
-            with conn.cursor() as cursor:
-                for statement in ensure_pre_statements:
-                    cursor.execute(statement)
-            self._backfill_task_path(db_alias=db_alias)
-            with conn.cursor() as cursor:
-                for statement in ensure_post_statements:
-                    cursor.execute(statement)
-            self.stdout.write(self.style.SUCCESS("✅ Reproq schema updated."))
-            return
-        self.stdout.write(
-            self.style.MIGRATE_HEADING(
-                f"Applying Reproq schema (missing: {', '.join(missing_tables)})..."
+                require_public_relations_v1(conn, allow_missing=True)
+            except SchemaAdoptionError as exc:
+                raise CommandError(str(exc)) from exc
+        tables = set(conn.introspection.table_names())
+        applied = {name for app, name in MigrationRecorder(conn).applied_migrations()
+                   if app == "reproq_django"}
+        if "task_runs" in tables and not ({BASELINE, *COVERED_REPLACEMENTS} <= applied):
+            raise CommandError(
+                "Legacy ReproQ history requires explicit guarded adoption. Run "
+                "reproq adopt-schema --inspect on the selected database; do not fake migrations."
             )
-        )
-        statements = [
-            """
-            CREATE TABLE IF NOT EXISTS task_runs (
-                result_id BIGSERIAL PRIMARY KEY,
-                backend_alias TEXT NOT NULL DEFAULT 'default',
-                queue_name TEXT NOT NULL DEFAULT 'default',
-                priority INTEGER NOT NULL DEFAULT 0,
-                run_after TIMESTAMPTZ,
-                spec_json JSONB NOT NULL,
-                spec_hash CHAR(64) NOT NULL,
-                task_path TEXT,
-                status TEXT NOT NULL DEFAULT 'READY',
-                enqueued_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                started_at TIMESTAMPTZ,
-                last_attempted_at TIMESTAMPTZ,
-                finished_at TIMESTAMPTZ,
-                attempts INTEGER NOT NULL DEFAULT 0,
-                max_attempts INTEGER NOT NULL DEFAULT 3,
-                timeout_seconds INTEGER NOT NULL DEFAULT 900,
-                lock_key TEXT,
-                concurrency_key TEXT,
-                concurrency_limit INTEGER NOT NULL DEFAULT 0,
-                worker_ids JSONB NOT NULL DEFAULT '[]'::jsonb,
-                return_json JSONB,
-                errors_json JSONB NOT NULL DEFAULT '[]'::jsonb,
-                metadata_json JSONB NOT NULL DEFAULT '{}'::jsonb,
-                last_error TEXT,
-                failed_at TIMESTAMPTZ,
-                leased_until TIMESTAMPTZ,
-                leased_by TEXT,
-                logs_uri TEXT,
-                artifacts_uri TEXT,
-                expires_at TIMESTAMPTZ,
-                parent_id BIGINT REFERENCES task_runs(result_id) ON DELETE SET NULL,
-                workflow_id UUID,
-                wait_count INTEGER NOT NULL DEFAULT 0,
-                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                cancel_requested BOOLEAN NOT NULL DEFAULT FALSE
-            );
-            """,
-            """
-            CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_task_runs_claim
-            ON task_runs (queue_name, status, priority DESC, enqueued_at ASC)
-            WHERE status = 'READY';
-            """,
-            """
-            CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS idx_task_runs_spec_unique
-            ON task_runs (spec_hash)
-            WHERE status IN ('READY', 'RUNNING');
-            """,
-            """
-            CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_task_runs_lock_key
-            ON task_runs (lock_key)
-            WHERE status = 'RUNNING';
-            """,
-            """
-            CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_task_runs_parent_id
-            ON task_runs (parent_id)
-            WHERE status = 'WAITING';
-            """,
-            """
-            CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_task_runs_workflow_id
-            ON task_runs (workflow_id);
-            """,
-            """
-            CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_task_runs_failed_at
-            ON task_runs (failed_at)
-            WHERE status = 'FAILED';
-            """,
-            """
-            CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_task_runs_task_path
-            ON task_runs (task_path);
-            """,
-            """
-            CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_task_runs_claim_due
-            ON task_runs (queue_name, COALESCE(run_after, '-infinity'::timestamptz), priority DESC, enqueued_at ASC)
-            WHERE status = 'READY';
-            """,
-            """
-            CREATE OR REPLACE FUNCTION reproq_task_path_from_spec()
-            RETURNS trigger AS $$
-            BEGIN
-                IF NEW.task_path IS NULL OR NEW.task_path = '' THEN
-                    NEW.task_path := NEW.spec_json->>'task_path';
-                END IF;
-                RETURN NEW;
-            END;
-            $$ LANGUAGE plpgsql;
-            """,
-            """
-            DROP TRIGGER IF EXISTS trg_task_runs_task_path ON task_runs;
-            """,
-            """
-            CREATE TRIGGER trg_task_runs_task_path
-            BEFORE INSERT OR UPDATE OF spec_json, task_path ON task_runs
-            FOR EACH ROW
-            EXECUTE FUNCTION reproq_task_path_from_spec();
-            """,
-            """
-            DO $$
-            BEGIN
-                IF NOT EXISTS (
-                    SELECT 1 FROM pg_constraint WHERE conname = 'task_runs_task_path_not_empty'
-                ) THEN
-                    ALTER TABLE task_runs
-                    ADD CONSTRAINT task_runs_task_path_not_empty CHECK (task_path IS NOT NULL AND task_path <> '') NOT VALID;
-                END IF;
-            END $$;
-            """,
-            """
-            CREATE TABLE IF NOT EXISTS periodic_tasks (
-                name TEXT PRIMARY KEY,
-                cron_expr TEXT NOT NULL,
-                task_path TEXT NOT NULL,
-                payload_json JSONB NOT NULL DEFAULT '{}'::jsonb,
-                queue_name TEXT NOT NULL DEFAULT 'default',
-                priority INTEGER NOT NULL DEFAULT 0,
-                max_attempts INTEGER NOT NULL DEFAULT 3,
-                concurrency_key TEXT,
-                concurrency_limit INTEGER NOT NULL DEFAULT 0,
-                last_run_at TIMESTAMPTZ,
-                next_run_at TIMESTAMPTZ NOT NULL,
-                enabled BOOLEAN NOT NULL DEFAULT TRUE,
-                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-            );
-            """,
-            """
-            CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_periodic_tasks_next_run
-            ON periodic_tasks (next_run_at)
-            WHERE enabled = TRUE;
-            """,
-            """
-            CREATE TABLE IF NOT EXISTS reproq_queue_controls (
-                queue_name TEXT PRIMARY KEY,
-                paused BOOLEAN NOT NULL DEFAULT FALSE,
-                paused_at TIMESTAMPTZ,
-                reason TEXT,
-                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-            );
-            """,
-            """
-            CREATE TABLE IF NOT EXISTS reproq_workers (
-                worker_id TEXT PRIMARY KEY,
-                hostname TEXT,
-                concurrency INTEGER,
-                queues JSONB NOT NULL DEFAULT '[]'::jsonb,
-                started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                last_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                version TEXT
-            );
-            """,
-            """
-            CREATE TABLE IF NOT EXISTS rate_limits (
-                key TEXT PRIMARY KEY,
-                tokens_per_second REAL NOT NULL,
-                burst_size INTEGER NOT NULL,
-                current_tokens REAL NOT NULL,
-                last_refilled_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-            );
-            """,
-            """
-            INSERT INTO rate_limits (key, tokens_per_second, burst_size, current_tokens)
-            VALUES ('global', 0, 1, 0)
-            ON CONFLICT (key) DO NOTHING;
-            """,
-            """
-            CREATE TABLE IF NOT EXISTS workflow_runs (
-                workflow_id UUID PRIMARY KEY,
-                expected_count INTEGER NOT NULL,
-                success_count INTEGER NOT NULL DEFAULT 0,
-                failure_count INTEGER NOT NULL DEFAULT 0,
-                callback_result_id BIGINT,
-                status TEXT NOT NULL DEFAULT 'RUNNING',
-                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-            );
-            """,
-            """
-            CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_workflow_runs_callback
-            ON workflow_runs (callback_result_id);
-            """,
-        ]
-        with conn.cursor() as cursor:
-            for statement in statements:
-                cursor.execute(statement)
-            for statement in ensure_pre_statements:
-                cursor.execute(statement)
-        self._backfill_task_path(db_alias=db_alias)
-        with conn.cursor() as cursor:
-            for statement in ensure_post_statements:
-                cursor.execute(statement)
-        self.stdout.write(self.style.SUCCESS("✅ Reproq schema applied."))
+        call_command("migrate", "reproq_django", database=db_alias, interactive=False,
+                     stdout=self.stdout, stderr=self.stderr)
+        try:
+            require_schema_contract(conn)
+        except SchemaContractError as exc:
+            raise CommandError(str(exc)) from exc
+        self.stdout.write(self.style.SUCCESS(f"ReproQ Django schema contract is ready ({db_alias})."))
+
+    def run_adopt_schema(self, options):
+        conn = connections[self._resolve_db_alias(options)]
+        try:
+            if options.get("inspect"):
+                result = inspect_legacy_schema(conn)
+            else:
+                if not options.get("audit_output"):
+                    raise SchemaAdoptionError("Supply --audit-output for the guarded adoption receipt.")
+                result = adopt_legacy_schema(
+                    conn, expected_catalog_sha256=options.get("expected_catalog_sha256", ""),
+                    audit_output=options["audit_output"],
+                )
+        except SchemaAdoptionError as exc:
+            raise CommandError(str(exc)) from exc
+        self.stdout.write(json.dumps(result, sort_keys=True))
 
     def run_worker_or_beat(self, cmd, options):
-        db_alias = (options.get("database") or "").strip()
-        dsn = self.get_dsn(db_alias or None)
+        db_alias = self._resolve_db_alias(options)
+        dsn = self.get_dsn(db_alias)
         worker_bin, resolved_bin, exists = self._resolve_worker_bin()
         if not exists:
             hint = (
@@ -1540,45 +1167,61 @@ WantedBy=timers.target
             raise CommandError(
                 f"Worker binary not found (resolved: {resolved_bin or worker_bin}). {hint}"
             )
-        if cmd == "worker":
-            explicit_flags = any(
-                self._flag_present(flag)
-                for flag in [
-                    "--config",
-                    "--concurrency",
-                    "--queues",
-                    "--queue",
-                    "--allowed-task-modules",
-                    "--database",
-                    "--logs-dir",
-                    "--payload-mode",
-                    "--metrics-port",
-                    "--metrics-addr",
-                    "--metrics-auth-token",
-                    "--metrics-allow-cidrs",
-                    "--metrics-tls-cert",
-                    "--metrics-tls-key",
-                    "--metrics-tls-client-ca",
-                    "--metrics-auth-limit",
-                    "--metrics-auth-window",
-                    "--metrics-auth-max-entries",
-                ]
-            )
-        else:
-            explicit_flags = any(
-                self._flag_present(flag)
-                for flag in [
-                    "--config",
-                    "--interval",
-                    "--once",
-                    "--database",
-                ]
-            )
-
-        config_path = self._resolve_config_path(options.get("config"), not explicit_flags)
+        try:
+            require_worker_capabilities(worker_bin)
+        except ValueError as error:
+            raise CommandError(str(error)) from error
+        runtime_names = (
+            "concurrency", "queues", "allowed_task_modules", "logs_dir", "payload_mode",
+            "metrics_port", "metrics_addr", "metrics_auth_token", "metrics_allow_cidrs",
+            "metrics_tls_cert", "metrics_tls_key", "metrics_tls_client_ca",
+            "metrics_auth_limit", "metrics_auth_window", "metrics_auth_max_entries",
+        ) if cmd == "worker" else ("interval",)
+        if cmd == "worker" and "queue" in options:
+            raise CommandError("The worker --queue option is retired; use --queues.")
+        overrides = {name: options[name] for name in runtime_names if options.get(name) is not None}
+        # Go also discovers a default file when flags are present. Resolve and
+        # disclose that same file before validating its queues and DSN; runtime
+        # flags override it rather than creating a second discovery policy.
+        config_path = self._resolve_config_path(options.get("config"))
         use_config = bool(config_path)
         if use_config and not os.path.exists(config_path):
             raise CommandError(f"Config file not found: {config_path}")
+
+        selected_alias = self._resolve_db_alias(options)
+        expected_dsn = self.get_dsn(selected_alias)
+        file_config = None
+        if use_config:
+            file_config, _ = self._load_config_file(config_path)
+        env_config, errors = self._build_env_config()
+        if errors:
+            raise CommandError("; ".join(errors))
+        effective, sources = self._effective_config(file_config, env_config)
+        if dsn:
+            self._apply_settings_dsn(effective, sources, dsn, "settings")
+        effective_dsn = self._resolve_effective_dsn(effective, cmd)
+        if cmd == 'worker':
+            from ...db import resolve_queue_db
+
+            if "queues" in overrides:
+                queues = self._parse_comma_list(overrides["queues"]) or ['default']
+            else:
+                queues = effective.get('worker', {}).get('queues') or ['default']
+            mismatches = [queue for queue in queues if resolve_queue_db(queue) != selected_alias]
+            if mismatches:
+                raise CommandError(
+                    'Selected worker queues do not route to its Django database alias; '
+                    'configure REPROQ_QUEUE_DATABASES before starting the worker.'
+                )
+        try:
+            matches = bool(expected_dsn and effective_dsn) and self._dsn_target(effective_dsn) == self._dsn_target(expected_dsn)
+        except Exception:
+            matches = False
+        if not matches:
+            raise CommandError(
+                f"{cmd.capitalize()} DSN does not match selected Django queue database "
+                f"alias {selected_alias!r}; align the configuration before starting it."
+            )
 
         if not dsn and not use_config:
             hint = "DATABASE_URL not set. Reproq worker requires a Postgres DSN."
@@ -1597,391 +1240,87 @@ WantedBy=timers.target
         args = [worker_bin, cmd]
         if use_config:
             args.extend(["--config", config_path])
-        else:
-            args.extend(["--dsn", dsn])
+        child_environment = os.environ.copy()
+        # DATABASE_URL belongs to Django's business database. Python task
+        # processes inherit it unchanged, even when their queue is elsewhere.
+        child_environment["REPROQ_DATABASE_URL"] = effective_dsn
 
-        if cmd == "worker":
-            if use_config:
-                if self._flag_present("--concurrency"):
-                    args.extend(["--concurrency", str(options["concurrency"])])
-                if self._flag_present("--queues"):
-                    args.extend(["--queues", options.get("queues") or ""])
-                elif self._flag_present("--queue"):
-                    args.extend(["--queues", options.get("queue", "default")])
-                if self._flag_present("--allowed-task-modules"):
-                    args.extend(["--allowed-task-modules", options.get("allowed_task_modules") or ""])
-                if self._flag_present("--logs-dir"):
-                    args.extend(["--logs-dir", options.get("logs_dir") or ""])
-                if self._flag_present("--payload-mode"):
-                    args.extend(["--payload-mode", options.get("payload_mode") or ""])
-                if self._flag_present("--metrics-port"):
-                    args.extend(["--metrics-port", str(options["metrics_port"])])
-                if self._flag_present("--metrics-addr"):
-                    args.extend(["--metrics-addr", options.get("metrics_addr") or ""])
-                if self._flag_present("--metrics-auth-token"):
-                    args.extend(["--metrics-auth-token", options.get("metrics_auth_token") or ""])
-                if self._flag_present("--metrics-allow-cidrs"):
-                    args.extend(["--metrics-allow-cidrs", options.get("metrics_allow_cidrs") or ""])
-                if self._flag_present("--metrics-auth-limit"):
-                    args.extend(["--metrics-auth-limit", str(options["metrics_auth_limit"])])
-                if self._flag_present("--metrics-auth-window"):
-                    args.extend(["--metrics-auth-window", options.get("metrics_auth_window") or ""])
-                if self._flag_present("--metrics-auth-max-entries"):
-                    args.extend(["--metrics-auth-max-entries", str(options["metrics_auth_max_entries"])])
-                if self._flag_present("--metrics-tls-cert"):
-                    args.extend(["--metrics-tls-cert", options.get("metrics_tls_cert") or ""])
-                if self._flag_present("--metrics-tls-key"):
-                    args.extend(["--metrics-tls-key", options.get("metrics_tls_key") or ""])
-                if self._flag_present("--metrics-tls-client-ca"):
-                    args.extend(["--metrics-tls-client-ca", options.get("metrics_tls_client_ca") or ""])
+        for name, value in overrides.items():
+            # Do not use truthiness: empty strings clear inherited settings,
+            # and zero can deliberately disable a metrics port.
+            args.extend(["--" + name.replace("_", "-"), str(value)])
+        if cmd == "worker" and not use_config and "allowed_task_modules" not in overrides:
+            if os.environ.get("ALLOWED_TASK_MODULES"):
+                self.stdout.write("ALLOWED_TASK_MODULES set in environment; using it.")
             else:
-                args.extend(["--concurrency", str(options["concurrency"])])
-                queues = options.get("queues") or ""
-                if queues:
-                    args.extend(["--queues", queues])
+                auto_modules, task_paths, errors = self._compute_allowed_task_modules()
+                if errors:
+                    self._report_allowlist_errors(errors)
+                if auto_modules:
+                    auto_value = ",".join(auto_modules)
+                    args.extend(["--allowed-task-modules", auto_value])
+                    self.stdout.write(f"Auto-configured ALLOWED_TASK_MODULES={auto_value}")
                 else:
-                    args.extend(["--queues", options.get("queue", "default")])
-                if options.get("allowed_task_modules"):
-                    args.extend(["--allowed-task-modules", options["allowed_task_modules"]])
-                elif os.environ.get("ALLOWED_TASK_MODULES"):
-                    self.stdout.write("ALLOWED_TASK_MODULES set in environment; using it.")
-                else:
-                    auto_modules, task_paths, errors = self._compute_allowed_task_modules()
-                    if errors:
-                        self._report_allowlist_errors(errors)
-                    if auto_modules:
-                        auto_value = ",".join(auto_modules)
-                        args.extend(["--allowed-task-modules", auto_value])
-                        self.stdout.write(f"Auto-configured ALLOWED_TASK_MODULES={auto_value}")
-                    else:
-                        self.stderr.write(
-                            self.style.WARNING(
-                                "No task modules discovered; default allow-list will be used."
-                            )
+                    self.stderr.write(
+                        self.style.WARNING(
+                            "No task modules discovered; default allow-list will be used."
                         )
-                if options.get("logs_dir"):
-                    args.extend(["--logs-dir", options["logs_dir"]])
-                if options.get("payload_mode"):
-                    args.extend(["--payload-mode", options["payload_mode"]])
-                if options.get("metrics_port"):
-                    args.extend(["--metrics-port", str(options["metrics_port"])])
-                if options.get("metrics_addr"):
-                    args.extend(["--metrics-addr", options["metrics_addr"]])
-                if options.get("metrics_auth_token"):
-                    args.extend(["--metrics-auth-token", options["metrics_auth_token"]])
-                if options.get("metrics_allow_cidrs"):
-                    args.extend(["--metrics-allow-cidrs", options["metrics_allow_cidrs"]])
-                if options.get("metrics_tls_cert"):
-                    args.extend(["--metrics-tls-cert", options["metrics_tls_cert"]])
-                if options.get("metrics_tls_key"):
-                    args.extend(["--metrics-tls-key", options["metrics_tls_key"]])
-                if options.get("metrics_tls_client_ca"):
-                    args.extend(["--metrics-tls-client-ca", options["metrics_tls_client_ca"]])
-                if options.get("metrics_auth_limit") is not None:
-                    args.extend(["--metrics-auth-limit", str(options["metrics_auth_limit"])])
-                if options.get("metrics_auth_window"):
-                    args.extend(["--metrics-auth-window", options["metrics_auth_window"]])
-                if options.get("metrics_auth_max_entries") is not None:
-                    args.extend(["--metrics-auth-max-entries", str(options["metrics_auth_max_entries"])])
-        elif cmd == "beat":
-            if use_config:
-                if self._flag_present("--interval"):
-                    args.extend(["--interval", options["interval"]])
-                if options.get("once"):
-                    args.append("--once")
-            else:
-                args.extend(["--interval", options["interval"]])
-                if options.get("once"):
-                    args.append("--once")
+                    )
+        elif cmd == "beat" and options.get("once"):
+            args.append("--once")
             
         self.stdout.write(f"Starting {cmd}...")
+        connections.close_all()
+        self.stdout.flush()
+        self.stderr.flush()
+        sys.stdout.flush()
+        sys.stderr.flush()
         try:
-            subprocess.run(args, check=True)
-        except KeyboardInterrupt:
-            pass
-        except Exception as e:
-            self.stderr.write(self.style.ERROR(f"Error running {cmd}: {e}"))
+            os.execvpe(worker_bin, args, child_environment)
+        except OSError as error:
+            raise CommandError(f"Cannot replace foreground process with {cmd}: {error}") from error
 
     def run_pg_cron(self, options):
-        if_supported = options.get("if_supported")
-        db_alias = self._resolve_db_alias(options)
-        conn = connections[db_alias]
+        from ...pg_cron import PgCronError, is_available, reconcile
+
+        alias = self._resolve_db_alias(options)
+        conn = connections[alias]
+        install, remove = options.get("install"), options.get("remove")
+        if install and remove:
+            raise CommandError("Choose either --install or --remove (not both).")
         if conn.vendor != "postgresql":
-            if if_supported:
+            if options.get("if_supported"):
                 self.stdout.write("pg-cron unavailable (non-Postgres database); skipping.")
                 return
             raise CommandError("pg-cron requires a PostgreSQL database.")
-
-        install = options.get("install")
-        remove = options.get("remove")
-        if install and remove:
-            raise CommandError("Choose either --install or --remove (not both).")
-        if not install and not remove:
-            install = True
-
-        prefix = (options.get("prefix") or "reproq_periodic").strip()
-        dry_run = options.get("dry_run")
-
         with conn.cursor() as cursor:
-            tables = set(conn.introspection.table_names(cursor))
-            if "periodic_tasks" not in tables:
-                raise CommandError("Missing periodic_tasks table. Run migrations first.")
-            if not self._pg_cron_available(cursor):
-                if if_supported:
-                    self.stdout.write("pg-cron extension not available; skipping.")
-                    return
-                raise CommandError("pg_cron extension is not available on this database.")
-            try:
-                self._ensure_pg_cron_extensions(cursor, dry_run)
-            except CommandError:
-                if if_supported:
-                    self.stdout.write(self.style.WARNING("pg-cron could not be enabled; skipping."))
-                    return
-                raise
-            supports_named = self._pg_cron_supports_named_jobs(cursor)
-            if remove:
-                self._unschedule_pg_cron_jobs(cursor, prefix, supports_named, dry_run)
-                self._drop_pg_cron_function(cursor, dry_run)
-                return
-
-            self._ensure_pg_cron_function(cursor, dry_run)
-            self._unschedule_pg_cron_jobs(cursor, prefix, supports_named, dry_run)
-            self._schedule_pg_cron_jobs(cursor, prefix, supports_named, dry_run)
-
-    def _pg_cron_available(self, cursor):
-        cursor.execute(
-            "SELECT COUNT(*) FROM pg_available_extensions WHERE name = 'pg_cron';"
-        )
-        return cursor.fetchone()[0] > 0
-
-    def _ensure_pg_cron_extensions(self, cursor, dry_run):
-        if dry_run:
-            self.stdout.write("dry-run: ensure extensions pgcrypto, pg_cron")
+            available = is_available(cursor)
+        if not available and options.get("if_supported"):
+            self.stdout.write("pg-cron extension is not installed; skipping.")
             return
         try:
-            cursor.execute("CREATE EXTENSION IF NOT EXISTS pgcrypto;")
-            cursor.execute("CREATE EXTENSION IF NOT EXISTS pg_cron;")
-        except Exception as exc:
-            raise CommandError(
-                "Failed to enable pg_cron. Ensure it is available and listed in "
-                "shared_preload_libraries on your Postgres server."
-            ) from exc
+            result = reconcile(conn, prefix=options.get("prefix") or "reproq_periodic",
+                               remove=bool(remove), dry_run=bool(options.get("dry_run")))
+        except (PgCronError, SchemaContractError, SchemaInspectionError, ValueError) as exc:
+            raise CommandError(str(exc)) from exc
+        self.stdout.write(json.dumps(result, sort_keys=True))
 
-    def _pg_cron_supports_named_jobs(self, cursor):
-        cursor.execute(
-            """
-            SELECT COUNT(*)
-            FROM pg_proc p
-            JOIN pg_namespace n ON p.pronamespace = n.oid
-            WHERE n.nspname = 'cron' AND p.proname = 'schedule' AND p.pronargs = 3
-            """
-        )
-        return cursor.fetchone()[0] > 0
+    def _periodic_registration_problems(self, alias):
+        problems = [f"Periodic definition {row.name!r} requires explicit SDK reconciliation "
+                "and scheduler provider assignment before it can run."
+                for row in PeriodicTask.objects.using(alias).filter(enabled=True)
+                if periodic_definition_status(row.spec_version, row.scheduler_provider) == "reconciliation_required"]
+        legacy = TaskRun.objects.using(alias).filter(status__in=['READY', 'RUNNING', 'WAITING']).exclude(spec_version=1).count()
+        if legacy:
+            problems.append(f"{legacy} queued legacy/unknown-version task(s) require draining "
+                            "with the old runtime or explicit audited operator action before schema2 cutover; "
+                            "no historical payload or version will be rewritten automatically.")
+        return problems
 
-    def _drop_pg_cron_function(self, cursor, dry_run):
-        if dry_run:
-            self.stdout.write("dry-run: drop function reproq_enqueue_periodic_task")
-            return
-        cursor.execute("DROP FUNCTION IF EXISTS reproq_enqueue_periodic_task(TEXT);")
+    def _pg_cron_available(self, cursor):
+        from ...pg_cron import is_available
 
-    def _pg_cron_function_sql(self):
-        return """
-            CREATE OR REPLACE FUNCTION reproq_enqueue_periodic_task(task_name TEXT)
-            RETURNS VOID
-            LANGUAGE plpgsql
-            AS $$
-            DECLARE
-                task_row periodic_tasks%ROWTYPE;
-                payload_json JSONB;
-                args_json JSONB;
-                kwargs_json JSONB;
-                spec JSONB;
-                spec_hash TEXT;
-            BEGIN
-                SELECT * INTO task_row
-                FROM periodic_tasks
-                WHERE name = task_name AND enabled = TRUE;
-
-                IF NOT FOUND THEN
-                    RETURN;
-                END IF;
-
-                payload_json := COALESCE(task_row.payload_json, '{}'::jsonb);
-                args_json := '[]'::jsonb;
-                kwargs_json := '{}'::jsonb;
-
-                IF jsonb_typeof(payload_json) = 'object' THEN
-                    IF payload_json ? 'args' OR payload_json ? 'kwargs' THEN
-                        args_json := COALESCE(payload_json->'args', '[]'::jsonb);
-                        kwargs_json := COALESCE(payload_json->'kwargs', '{}'::jsonb);
-                    ELSE
-                        kwargs_json := payload_json;
-                    END IF;
-                ELSIF jsonb_typeof(payload_json) = 'array' THEN
-                    args_json := payload_json;
-                END IF;
-
-                spec := jsonb_build_object(
-                    'task_path', task_row.task_path,
-                    'args', args_json,
-                    'kwargs', kwargs_json,
-                    'queue_name', COALESCE(task_row.queue_name, 'default'),
-                    'priority', COALESCE(task_row.priority, 0),
-                    'concurrency_key', task_row.concurrency_key,
-                    'concurrency_limit', COALESCE(task_row.concurrency_limit, 0),
-                    'periodic_name', task_row.name,
-                    'scheduled_at', to_char(NOW() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'),
-                    'exec', jsonb_build_object(
-                        'timeout_seconds', 900,
-                        'max_attempts', COALESCE(NULLIF(task_row.max_attempts, 0), 3)
-                    )
-                );
-                spec_hash := encode(digest(spec::text, 'sha256'), 'hex');
-
-                INSERT INTO task_runs (
-                    backend_alias,
-                    queue_name,
-                    priority,
-                    run_after,
-                    spec_json,
-                    spec_hash,
-                    task_path,
-                    status,
-                    enqueued_at,
-                    attempts,
-                    max_attempts,
-                    timeout_seconds,
-                    concurrency_key,
-                    concurrency_limit,
-                    wait_count,
-                    worker_ids,
-                    errors_json,
-                    cancel_requested,
-                    created_at,
-                    updated_at
-                )
-                SELECT
-                    'default',
-                    COALESCE(task_row.queue_name, 'default'),
-                    COALESCE(task_row.priority, 0),
-                    NOW(),
-                    spec,
-                    spec_hash,
-                    task_row.task_path,
-                    'READY',
-                    NOW(),
-                    0,
-                    COALESCE(NULLIF(task_row.max_attempts, 0), 3),
-                    900,
-                    task_row.concurrency_key,
-                    COALESCE(task_row.concurrency_limit, 0),
-                    0,
-                    '[]'::jsonb,
-                    '[]'::jsonb,
-                    FALSE,
-                    NOW(),
-                    NOW()
-                WHERE NOT EXISTS (
-                    SELECT 1
-                    FROM task_runs
-                    WHERE task_runs.spec_hash = spec_hash
-                      AND status IN ('READY', 'RUNNING')
-                );
-
-                UPDATE periodic_tasks
-                SET last_run_at = NOW(),
-                    updated_at = NOW()
-                WHERE name = task_row.name;
-            END;
-            $$;
-        """
-
-    def _ensure_pg_cron_function(self, cursor, dry_run):
-        sql = self._pg_cron_function_sql()
-        if dry_run:
-            self.stdout.write("dry-run: create function reproq_enqueue_periodic_task")
-            return
-        cursor.execute(sql)
-
-    def _unschedule_pg_cron_jobs(self, cursor, prefix, supports_named, dry_run):
-        rows = []
-        if supports_named:
-            cursor.execute(
-                "SELECT jobid, jobname FROM cron.job WHERE jobname LIKE %s",
-                [prefix + "%"],
-            )
-            rows = cursor.fetchall()
-        else:
-            cursor.execute(
-                "SELECT jobid, command FROM cron.job WHERE command LIKE %s",
-                ["SELECT reproq_enqueue_periodic_task(%"],
-            )
-            rows = cursor.fetchall()
-
-        if not rows:
-            self.stdout.write("No existing pg_cron jobs to remove.")
-            return
-
-        for jobid, label in rows:
-            if dry_run:
-                self.stdout.write(f"dry-run: unschedule job {label} ({jobid})")
-                continue
-            cursor.execute("SELECT cron.unschedule(%s);", [jobid])
-        self.stdout.write(f"Removed {len(rows)} pg_cron job(s).")
-
-    def _schedule_pg_cron_jobs(self, cursor, prefix, supports_named, dry_run):
-        tasks = list(
-            PeriodicTask.objects.filter(enabled=True).values(
-                "name",
-                "cron_expr",
-            )
-        )
-        if not tasks:
-            self.stdout.write("No enabled periodic tasks found; nothing to schedule.")
-            return
-
-        used_names = set()
-        for task in tasks:
-            name = task["name"]
-            cron_expr = task["cron_expr"]
-            if not cron_expr:
-                self.stdout.write(f"Skipping periodic task with empty cron_expr: {name}")
-                continue
-            jobname = self._pg_cron_job_name(prefix, name)
-            while jobname in used_names:
-                jobname = self._pg_cron_job_name(
-                    prefix,
-                    f"{name}-{hashlib.sha256(jobname.encode('utf-8')).hexdigest()[:4]}",
-                )
-            used_names.add(jobname)
-            escaped = name.replace("'", "''")
-            command = f"SELECT reproq_enqueue_periodic_task('{escaped}');"
-            if dry_run:
-                self.stdout.write(
-                    f"dry-run: schedule {jobname} {cron_expr} -> {command}"
-                )
-                continue
-            if supports_named:
-                cursor.execute(
-                    "SELECT cron.schedule(%s, %s, %s);",
-                    [jobname, cron_expr, command],
-                )
-            else:
-                cursor.execute(
-                    "SELECT cron.schedule(%s, %s);",
-                    [cron_expr, command],
-                )
-        self.stdout.write(f"Scheduled {len(tasks)} pg_cron job(s).")
-
-    def _pg_cron_job_name(self, prefix, name):
-        cleaned = re.sub(r"[^a-zA-Z0-9_]+", "_", name).strip("_")
-        if not cleaned:
-            cleaned = hashlib.sha256(name.encode("utf-8")).hexdigest()[:8]
-        base = f"{prefix}_{cleaned}" if prefix else cleaned
-        if len(base) <= 63:
-            return base
-        suffix = hashlib.sha256(base.encode("utf-8")).hexdigest()[:8]
-        return f"{base[:54]}_{suffix}"
+        return is_available(cursor)
 
     def run_allowlist(self, options):
         allowed, task_paths, errors = self._compute_allowed_task_modules()
@@ -1999,7 +1338,7 @@ WantedBy=timers.target
             return
         allowed_value = ",".join(allowed)
         if options.get("write"):
-            config_path = self._resolve_config_path(options.get("config"), True)
+            config_path = self._resolve_config_path(options.get("config"))
             if not config_path:
                 raise CommandError(
                     "Config file not found. Pass --config or run `python manage.py reproq init`."
@@ -2049,27 +1388,14 @@ WantedBy=timers.target
             self.stdout.write("(no log output)")
 
     def run_cancel(self, options):
-        result_id = options["id"]
-        db_alias = self._resolve_db_alias(options, result_id=result_id)
-        _, raw_id = parse_result_id(result_id)
+        from ...operations import OperationError, task_operation
+
+        alias = self._resolve_db_alias(options, result_id=options['id'])
         try:
-            run = TaskRun.objects.using(db_alias).get(result_id=raw_id)
-        except TaskRun.DoesNotExist as exc:
-            raise CommandError(f"Task run {result_id} not found.") from exc
-
-        if run.cancel_requested:
-            self.stdout.write(self.style.WARNING("Cancel already requested."))
-        else:
-            run.cancel_requested = True
-            run.save(update_fields=["cancel_requested"])
-            self.stdout.write(self.style.SUCCESS("Cancel requested."))
-
-        if run.status in ("SUCCESSFUL", "FAILED", "CANCELLED"):
-            self.stdout.write(
-                self.style.WARNING(
-                    f"Task is already {run.status}; worker may not cancel it."
-                )
-            )
+            task_operation('cancel', options['id'], using=alias)
+        except (OperationError, ValueError) as error:
+            raise CommandError(str(error)) from error
+        self.stdout.write('Cancellation request completed; inspect current task state.')
 
     def run_stats(self, options):
         from reproq_django.models import TaskRun, Worker
@@ -2099,62 +1425,6 @@ WantedBy=timers.target
                 color = self.style.SUCCESS if status == "SUCCESSFUL" else (self.style.ERROR if status == "FAILED" else self.style.WARNING)
                 self.stdout.write(f"  {status:<12}: {color(str(count))}")
 
-    def run_stress_test(self, options):
-        from reproq_django.tasks import debug_noop_task
-        import time
-        import django.tasks as django_tasks
-
-        count = options["count"]
-        sleep = options["sleep"]
-        bulk = options["bulk"]
-
-        self.stdout.write(self.style.MIGRATE_HEADING(f"🚀 Enqueueing {count} tasks (sleep={sleep}s, bulk={bulk})..."))
-        start = time.time()
-
-        def _resolve_backend():
-            if hasattr(django_tasks, "tasks"):
-                try:
-                    return django_tasks.tasks["default"]
-                except Exception:
-                    pass
-            if hasattr(django_tasks, "get_task_backend"):
-                try:
-                    return django_tasks.get_task_backend("default")
-                except Exception:
-                    pass
-            if hasattr(debug_noop_task, "get_backend"):
-                try:
-                    return debug_noop_task.get_backend()
-                except Exception:
-                    pass
-            backend = getattr(debug_noop_task, "backend", None)
-            if backend and not isinstance(backend, str):
-                return backend
-            return None
-
-        if bulk:
-            backend = _resolve_backend()
-            if backend is None:
-                self.stderr.write(
-                    self.style.WARNING(
-                        "Bulk enqueue unavailable; falling back to per-task enqueue."
-                    )
-                )
-                bulk = False
-            else:
-                tasks_data = [
-                    (debug_noop_task, (), {"sleep_seconds": sleep})
-                    for _ in range(count)
-                ]
-                backend.bulk_enqueue(tasks_data)
-
-        if not bulk:
-            for _ in range(count):
-                debug_noop_task.enqueue(sleep_seconds=sleep)
-
-        duration = time.time() - start
-        self.stdout.write(self.style.SUCCESS(f"✅ Enqueued {count} tasks in {duration:.2f}s ({count/duration:.1f} tasks/sec)"))
-        self.stdout.write("Run 'python manage.py reproq worker' to process them.")
 
     def get_worker_bin(self):
         worker_bin = getattr(settings, "REPROQ_WORKER_BIN", None) or os.environ.get(
@@ -2173,22 +1443,28 @@ WantedBy=timers.target
         return candidate if os.path.exists(candidate) else "reproq"
 
     def get_dsn(self, db_alias: str | None = None):
-        env_dsn = os.environ.get("DATABASE_URL")
-        if env_dsn and not db_alias:
-            return env_dsn
-        alias = db_alias or "default"
-        db_conf = settings.DATABASES.get(alias, {})
-        user = db_conf.get("USER")
-        name = db_conf.get("NAME")
-        if not user or not name:
+        alias = db_alias or default_db_alias()
+        conn = connections[alias]
+        if conn.vendor != "postgresql":
             return None
-        return f"postgres://{user}:{db_conf.get('PASSWORD', '')}@{db_conf.get('HOST', 'localhost')}:{db_conf.get('PORT', '5432')}/{name}"
+        from psycopg.conninfo import make_conninfo
 
-    def _flag_present(self, flag):
-        for arg in sys.argv:
-            if arg == flag or arg.startswith(flag + "="):
-                return True
-        return False
+        params = conn.get_connection_params()
+        for option in ["cursor_factory", "context", "prepare_threshold", "row_factory", "autocommit"]:
+            params.pop(option, None)
+        return make_conninfo(**params)
+
+    @staticmethod
+    def _dsn_target(dsn):
+        from psycopg.conninfo import conninfo_to_dict
+
+        parts = conninfo_to_dict(dsn)
+        host = parts.get("host", "")
+        if not host.startswith("/"):
+            host = host.lower()
+        return (host, parts.get("hostaddr", ""), parts.get("port") or "5432",
+                parts.get("dbname", ""), parts.get("user", ""), parts.get("options", ""),
+                parts.get("service", ""), parts.get("servicefile", ""))
 
     def _find_default_config(self):
         candidates = [
@@ -2204,15 +1480,13 @@ WantedBy=timers.target
                 return name
         return ""
 
-    def _resolve_config_path(self, option_value, allow_default):
+    def _resolve_config_path(self, option_value):
         if option_value:
             return option_value
         env_value = os.environ.get("REPROQ_CONFIG")
         if env_value:
             return env_value
-        if allow_default:
-            return self._find_default_config()
-        return ""
+        return self._find_default_config()
 
     def _resolve_worker_bin(self):
         worker_bin = self.get_worker_bin()
@@ -2225,21 +1499,18 @@ WantedBy=timers.target
 
     def _mask_dsn(self, dsn):
         try:
-            from urllib.parse import urlparse
-        except Exception:
-            return "<unavailable>"
-        try:
-            parsed = urlparse(dsn)
+            from psycopg.conninfo import conninfo_to_dict
+            parts = conninfo_to_dict(dsn)
         except Exception:
             return "<invalid>"
-        if not parsed.scheme:
-            return "<invalid>"
-        host = parsed.hostname or ""
-        port = f":{parsed.port}" if parsed.port else ""
-        user = parsed.username or ""
-        db = parsed.path.lstrip("/") if parsed.path else ""
+        host = quote(parts.get("host", ""), safe=":.,[]")
+        if ":" in host and "," not in host and not host.startswith("["):
+            host = "[" + host + "]"
+        port = ":" + parts["port"] if parts.get("port") else ""
+        user = quote(parts.get("user", ""), safe="")
+        db = quote(parts.get("dbname", ""), safe="")
         user_part = f"{user}@" if user else ""
-        return f"{parsed.scheme}://{user_part}{host}{port}/{db}"
+        return f"postgresql://{user_part}{host}{port}/{db}"
 
     def _sha256_file(self, path):
         h = hashlib.sha256()
@@ -2384,11 +1655,24 @@ WantedBy=timers.target
             self.stderr.write(self.style.WARNING(message))
 
     def _resolve_init_config_path(self, options):
+        fmt = options.get("format", "toml")
+        suffixes = {"toml": (".toml",), "yaml": (".yaml", ".yml")}
+        if fmt not in suffixes:
+            raise CommandError("Choose --format toml or --format yaml for the configuration file.")
         if options.get("config"):
-            return os.path.abspath(os.path.expanduser(options["config"]))
-        fmt = options.get("format", "yaml")
-        filename = "reproq.yaml" if fmt == "yaml" else "reproq.toml"
-        return os.path.join(os.getcwd(), filename)
+            path = os.path.abspath(os.path.expanduser(options["config"]))
+        else:
+            filename = "reproq.yaml" if fmt == "yaml" else "reproq.toml"
+            path = os.path.join(os.getcwd(), filename)
+        if os.path.splitext(path)[1].lower() not in suffixes[fmt]:
+            allowed = " or ".join(suffixes[fmt])
+            raise CommandError(
+                f"Config filename must end in {allowed} for --format {fmt}; "
+                "select --format toml for .toml or --format yaml for .yaml/.yml."
+            )
+        if os.path.isdir(path):
+            raise CommandError("Config path must name a file, not an existing directory.")
+        return path
 
     def _ensure_config_file(self, path, fmt, force):
         path = os.path.abspath(os.path.expanduser(path))
@@ -2402,42 +1686,13 @@ WantedBy=timers.target
 
     def _load_config_template(self, fmt):
         filename = f"reproq.example.{fmt}"
-        candidates = [os.path.join(os.getcwd(), filename)]
-        repo_root = os.path.abspath(
-            os.path.join(os.path.dirname(os.path.abspath(__file__)), "../../../../")
-        )
-        candidates.append(os.path.join(repo_root, filename))
-        for candidate in candidates:
-            if os.path.exists(candidate):
-                with open(candidate, "r", encoding="utf-8") as handle:
-                    return handle.read()
         try:
             resource = importlib.resources.files("reproq_django.resources").joinpath(filename)
             return resource.read_text(encoding="utf-8")
-        except Exception:
-            return self._fallback_config_template(fmt)
-
-    def _fallback_config_template(self, fmt):
-        if fmt == "toml":
-            return (
-                'dsn = "postgres://user:pass@localhost:5432/reproq?sslmode=disable"\n'
-                "\n"
-                "[worker]\n"
-                "queues = [\"default\"]\n"
-                "concurrency = 10\n"
-                "\n"
-                "[beat]\n"
-                "interval = \"30s\"\n"
-            )
-        return (
-            'dsn: "postgres://user:pass@localhost:5432/reproq?sslmode=disable"\n'
-            "worker:\n"
-            "  queues:\n"
-            "    - default\n"
-            "  concurrency: 10\n"
-            "beat:\n"
-            "  interval: \"30s\"\n"
-        )
+        except (ModuleNotFoundError, OSError, UnicodeError) as exc:
+            raise CommandError(
+                f"Bundled ReproQ {fmt} configuration template is unavailable; reinstall reproq-django."
+            ) from exc
 
     def _load_config_file(self, path):
         ext = os.path.splitext(path)[1].lower()
@@ -2461,6 +1716,11 @@ WantedBy=timers.target
 
         if not isinstance(data, dict):
             raise CommandError("Config file must be a mapping at the top level.")
+        if isinstance(data.get("worker"), dict) and "max_attempts_default" in data["worker"]:
+            raise CommandError(
+                "worker.max_attempts_default is retired; configure MAX_ATTEMPTS on "
+                "the Django task backend and reconcile periodic definitions explicitly."
+            )
         return data, fmt
 
     def _write_config_file(self, path, data, fmt):
@@ -2543,7 +1803,6 @@ WantedBy=timers.target
                 "max_stderr_bytes": 1048576,
                 "logs_dir": "",
                 "exec_timeout": "1h",
-                "max_attempts_default": 3,
                 "shutdown_timeout": "30s",
                 "priority_aging_factor": 60,
             },
@@ -2603,8 +1862,8 @@ WantedBy=timers.target
                 errors.append(f"Invalid {name}: {value}")
                 return None
 
-        if os.environ.get("DATABASE_URL"):
-            dsn = os.environ["DATABASE_URL"]
+        if os.environ.get("REPROQ_DATABASE_URL"):
+            dsn = os.environ["REPROQ_DATABASE_URL"]
             set_path(["dsn"], dsn)
             set_path(["worker", "dsn"], dsn)
             set_path(["beat", "dsn"], dsn)
@@ -2615,7 +1874,7 @@ WantedBy=timers.target
         if os.environ.get("QUEUE_NAMES"):
             set_path(
                 ["worker", "queues"],
-                self._parse_comma_list(os.environ["QUEUE_NAMES"]),
+                self._parse_comma_list(os.environ["QUEUE_NAMES"]) or ["default"],
             )
 
         if os.environ.get("ALLOWED_TASK_MODULES"):
@@ -2701,18 +1960,22 @@ WantedBy=timers.target
                 sources[path] = source
 
     def _apply_settings_dsn(self, config, sources, dsn, source):
-        config["dsn"] = dsn
-        config.setdefault("worker", {})["dsn"] = dsn
-        config.setdefault("beat", {})["dsn"] = dsn
-        sources["dsn"] = source
-        sources["worker.dsn"] = source
-        sources["beat.dsn"] = source
+        # Empty DSNs inherit; genuine operator values and their source survive.
+        # This same effective view is used by runtime preflight/config/doctor.
+        if config.get("dsn") is None or config.get("dsn") == "":
+            config["dsn"] = dsn
+            sources["dsn"] = source
+        for scope in ("worker", "beat"):
+            scoped = config.setdefault(scope, {})
+            if scoped.get("dsn") is None or scoped.get("dsn") == "":
+                scoped["dsn"] = config["dsn"]
+                sources[scope + ".dsn"] = sources["dsn"]
 
     def _resolve_effective_dsn(self, config, scope):
-        if scope == "worker":
-            return config.get("worker", {}).get("dsn") or config.get("dsn")
-        if scope == "beat":
-            return config.get("beat", {}).get("dsn") or config.get("dsn")
+        if scope in ("worker", "beat"):
+            scoped = config.get(scope, {}).get("dsn")
+            if scoped is not None and scoped != "":
+                return scoped
         return config.get("dsn")
 
     def _select_config_view(self, config, mode):

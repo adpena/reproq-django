@@ -57,7 +57,7 @@
                     </div>
                     <div class="p-4 bg-white border border-slate-200 rounded-xl shadow-sm">
                         <h3 class="font-bold text-indigo-600 mb-1">Deterministic</h3>
-                        <p class="text-sm text-slate-500">Stable spec hashing ensures you never run the same job twice unintentionally.</p>
+                        <p class="text-sm text-slate-500">Stable spec hashing deduplicates active equivalent jobs. At-least-once delivery still requires idempotent task side effects.</p>
                     </div>
                 </div>
             </section>
@@ -130,14 +130,14 @@ python manage.py reproq pg-cron --install</pre>
                 <h2 class="text-3xl font-bold mb-6">Management Commands</h2>
                 <p>Run <code>python manage.py reproq &lt;subcommand&gt;</code> for worker lifecycle and ops.</p>
                 <ul>
-                    <li><strong>init</strong>: Write <code>reproq.yaml</code>/<code>reproq.toml</code>, install the worker, and run migrations.</li>
+                    <li><strong>init</strong>: Write <code>reproq.toml</code>, install the worker, and run migrations. Explicit YAML requires PyYAML.</li>
                     <li><strong>worker</strong>: Start the Go worker process.</li>
                     <li><strong>beat</strong>: Start the periodic task scheduler (one per database). Use <code>--once</code> for cron.</li>
                     <li><strong>schedule</strong>: Enqueue due periodic tasks once and exit (alias for <code>beat --once</code>).</li>
                     <li><strong>pg-cron</strong>: Sync Postgres-native schedules via <code>pg_cron</code>.</li>
                     <li><strong>sync-recurring</strong>: Sync code-defined recurring schedules.</li>
                     <li><strong>pause-queue / resume-queue</strong>: Pause or resume queue processing.</li>
-                    <li><strong>migrate-worker</strong>: Apply worker indexes and schema helpers.</li>
+                    <li><strong>migrate-worker</strong>: Apply committed Django migrations on the selected queue database.</li>
                     <li><strong>doctor</strong>: Validate DSN, schema, worker binary, and allowlist health.</li>
                     <li><strong>config --explain</strong>: Print the effective config with precedence.</li>
                     <li><strong>upgrade</strong>: Fetch the latest worker release and run <code>migrate-worker</code>.</li>
@@ -145,7 +145,7 @@ python manage.py reproq pg-cron --install</pre>
                     <li><strong>reclaim</strong>: Requeue or fail tasks with expired leases.</li>
                     <li><strong>status / logs / cancel</strong>: Quick ops helpers for triage.</li>
                 </ul>
-                <p class="text-sm text-slate-600">Precedence: defaults &lt; config file &lt; env vars &lt; CLI flags. <code>--dsn</code> overrides <code>DATABASE_URL</code>.</p>
+                <p class="text-sm text-slate-600">Precedence: defaults &lt; config file &lt; env vars &lt; actual CLI options. Management commands derive empty queue DSNs from the selected Django database alias and validate explicit targets against it.</p>
             </section>
 
             <section id="architecture" class="mb-16 prose prose-slate max-w-none">
@@ -170,10 +170,18 @@ def process_invoice(invoice_id):
     pass
 
 # This ensures only one invoice_123 task runs at a time
-process_invoice.enqueue(123, lock_key="invoice_123")</pre>
+from reproq_django.concurrency import limits_concurrency
+
+@limits_concurrency(lambda invoice_id: f"invoice:{invoice_id}", to=1)
+@task
+def process_invoice(invoice_id):
+    ...
+
+process_invoice.enqueue(123)</pre>
                 <p>To allow limited parallelism, use <code>concurrency_key</code> + <code>concurrency_limit</code>.</p>
                 <pre># Allow up to 2 tasks with the same key
-process_invoice.enqueue(123, concurrency_key="invoice_123", concurrency_limit=2)</pre>
+# Choose to=2 on the same decorator for two active tasks per key.
+process_invoice.enqueue(123)</pre>
             </section>
 
             <section id="workflows" class="mb-16 prose prose-slate max-w-none">
@@ -233,26 +241,19 @@ def send_welcome_email(user_id, **_kwargs):
 
             <section id="periodic" class="mb-16 prose prose-slate max-w-none">
                 <h2 class="text-3xl font-bold mb-6">Periodic Tasks</h2>
-                <p>Manage cron schedules directly from the Django Admin or using the <code>PeriodicTask</code> model. Run either <code>reproq beat</code> or <code>reproq pg-cron</code> to trigger them.</p>
-                <pre>from django.utils import timezone
-from reproq_django.models import PeriodicTask
+                <p>Register canonical schedule intent explicitly with the SDK. Each definition belongs to Go beat (including one-shot scheduling) or optional native pg_cron.</p>
+                <pre>from myapp.tasks import nightly_cleanup
+from reproq_django.recurring import register_periodic
 
-PeriodicTask.objects.update_or_create(
+register_periodic(
     name="Nightly cleanup",
-    defaults={
-        "cron_expr": "0 2 * * *",
-        "task_path": "myapp.tasks.nightly_cleanup",
-        "queue_name": "maintenance",
-        "next_run_at": timezone.now(),
-        "enabled": True,
-    },
+    schedule="CRON_TZ=America/Chicago 0 2 * * *",
+    task=nightly_cleanup,
+    queue_name="maintenance",
+    scheduler_provider="go",
 )</pre>
-                <p class="text-sm text-slate-600">To run a schedule immediately, set <code>next_run_at</code> to <code>timezone.now()</code> or call the task's <code>enqueue()</code> method directly.</p>
-                <ul>
-                    <li><strong>cron_expr</strong>: standard 5-field cron syntax (min hour day month weekday).</li>
-                    <li><strong>task_path</strong>: full Python import path for the task.</li>
-                    <li><strong>queue_name</strong>: optional queue routing.</li>
-                </ul>
+                <p>Registration preserves operator enable/next/last state. Migrations never auto-seed schedules. Admin operators can pause definitions; canonical specs are read-only. Use the task's enqueue() for a separate ad-hoc run.</p>
+                <p>Native pg_cron requires administrator setup and a matching cron.timezone. Both providers use the same migration-owned enqueue primitive; native execution-minute and Go nominal-tick catch-up semantics differ. See the README for migration, ownership and timezone details.</p>
             </section>
 
             <section id="rate-limits" class="mb-16 prose prose-slate max-w-none">

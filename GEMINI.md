@@ -7,9 +7,11 @@ This project is the Django 6.0 Tasks backend for the Go-based `reproq-worker`.
 The project uses a unified management command `python manage.py reproq` to handle the worker lifecycle.
 
 ### Install Workflow
-The `reproq install` command is the primary way to fetch the Go binary:
-1.  **Download**: Attempts to fetch `reproq-{os}-{arch}` from `https://github.com/adpena/reproq-worker/releases`.
-2.  **Local Build**: Fallback to building from a sibling `reproq-worker` directory.
+The installer requires an explicit or published platform digest, verifies the
+bytes before executing them, probes schema2/executor-protocol2 capabilities and
+atomically replaces the installed worker only after success. Downloads never
+fall back to source. Source builds require explicit `--build --source PATH` and
+use the worker repository's canonical reproducible release builder/verifier.
 
 ### Settings
 The binary location is resolved in this order:
@@ -19,40 +21,43 @@ The binary location is resolved in this order:
 4.  System `PATH`
 
 ## Periodic Tasks
-Schedules live in the `PeriodicTask` model and are executed by `python manage.py reproq beat`.
-Run exactly one beat process per database.
-Use `python manage.py reproq beat --once` for cron-driven, low-memory scheduling.
-Code-defined schedules can be registered with `reproq_django.recurring.recurring` and
-synced via `python manage.py reproq sync-recurring`.
-`PeriodicTask.payload_json` uses `{"args": [...], "kwargs": {...}}` with the same encoding
-as task enqueues (models/timedeltas are supported).
+Use `register_periodic` or `@recurring` plus explicit `reproq sync-recurring`.
+Do not create runnable definitions with raw ORM writes or post_migrate hooks.
+The SDK canonical serializer owns specs for direct, bulk and periodic tasks.
+Registration preserves existing operator enable/next/last state unless explicitly
+reset. Each definition is assigned to Go or pg_cron. Go beat and one-shot schedule
+share one scheduler; native jobs call the migration-owned occurrence primitive.
+Native cron.timezone must match the definition's zone. Native execution-minute
+identity/catch-up differs from Go nominal-tick coalescing; see README.
 
-Example:
-```python
-from django.utils import timezone
-from reproq_django.models import PeriodicTask
+## Runtime Contract
+The worker and SDK must agree on schema2/executor protocol2 before claims.
+Every claim has a fresh UUID lease token; RUNNING owner/token/unexpired DB lease
+fence heartbeat, completion and Python metadata writes. Task logs go to stderr;
+stdout is one complete bounded UTF-8 JSON envelope. Invalid/oversized results
+fail, without silent truncation. Delivery is at least once: task side effects
+need application idempotency/transactions; token fencing is not exactly-once
+external execution. Foreground commands replace the Django parent process and
+preserve the worker exit status. Queue credentials use REPROQ_DATABASE_URL; business DATABASE_URL remains unchanged for Django tasks.
 
-PeriodicTask.objects.update_or_create(
-    name="Nightly cleanup",
-    defaults={
-        "cron_expr": "0 2 * * *",
-        "task_path": "myapp.tasks.nightly_cleanup",
-        "queue_name": "maintenance",
-        "next_run_at": timezone.now(),
-        "enabled": True,
-    },
-)
-```
-
-To trigger immediately, set `next_run_at = timezone.now()` or call `enqueue()` on the task directly.
+Native TaskResult/TaskContext classes, immutability, JSON args/kwargs,
+refresh-return-None and cumulative worker history define the public contract.
+Rich model/timedelta access is lazy and explicit decoded_args/decoded_kwargs;
+async callers await adecoded_args()/adecoded_kwargs(). Refresh never hydrates
+business models. Failures preserve qualified exception identity and bounded
+frames, with explicit diagnostic-budget markers. Resettable budget_attempt is
+separate from native attempts. TaskContext.from_claim accepts
+an immutable ExecutionClaim; only current v1 owned/unexpired rows can execute.
 
 ## Developer Note
 When modifying the Django models or backend logic, ensure compatibility with the Go worker's claiming SQL (found in `reproq-worker/internal/queue/queue.go`).
 
 ## Multi-Database Queues
 Queue routing is controlled by `REPROQ_QUEUE_DATABASES` and `REPROQ_DEFAULT_DB_ALIAS`.
-When multiple queue databases are configured, task result IDs may be prefixed with
-the database alias (control via `REPROQ_RESULT_ID_WITH_ALIAS`).
+Multiple queue databases require prefixed result IDs; their aliases are percent
+encoded and decoded canonically. Native IDs stay below64characters; unsupported
+alias lengths are rejected before producer writes. Disabling the prefix for
+multiple databases is rejected rather than guessing the result's database.
 
 ### Observability & Heatmaps
 - Surface rich statistics via `reproq_stats_api` to support TUI dashboards.
@@ -60,7 +65,11 @@ the database alias (control via `REPROQ_RESULT_ID_WITH_ALIAS`).
 - Support OIDC/OAuth flows for TUI authentication if managed headers are used.
 
 ## Migration + Release Policy
-- Keep exactly one migration file in `src/reproq_django/migrations/` unless absolutely necessary.
+- Preserve published migration bytes and append reviewed forward migrations.
+  Committed Django migrations own all six queue tables and their PostgreSQL DDL.
+  Legacy adoption requires full semantic catalog/history verification and an
+  explicit audit receipt. Workers require the migration-owned schema contract;
+  they must not create, repair, or migrate queue tables themselves.
 - Retain only three tags/releases at any time; delete older tags/releases and their artifacts.
 
 ## Testing

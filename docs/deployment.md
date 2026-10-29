@@ -10,17 +10,11 @@ Reproq is designed for stability in production environments. Follow these guidel
  - If you route queues to multiple databases, run one worker/beat per database alias (`--database`).
 
 **Option B: Single-service (web + worker + scheduler)**
-- Run the worker and beat in the same service as your web process (or use `pg-cron` and omit beat).
-- Simpler to deploy, but less reliable: background processes are not supervised and can die silently.
-
-Example single-service start command:
-```bash
-/bin/bash -lc "
-python manage.py reproq worker --concurrency 5 &
-python manage.py reproq beat --interval 30s &
-exec gunicorn myproj.wsgi:application --workers=1 --timeout=120
-"
-```
+- Run supervised worker and scheduler processes alongside the web process, or
+  assign supported native schedules to `pg_cron` and omit beat.
+- Use the packaged `reproq_django.resources/render_start.sh` supervisor; see
+  [Render deployment](../RENDER.md). Start with one task slot and measure combined
+  web/Go/Python peak memory before increasing concurrency.
 
 Only one `beat` instance should run per database.
 
@@ -62,7 +56,7 @@ sudo systemctl enable --now reproq-beat
 
 The Go worker needs access to your database. It respects the following:
 
-- `DATABASE_URL`: Standard PostgreSQL DSN (e.g., `postgres://user:pass@host:5432/dbname`). Optional if you provide `--dsn` or a config file with `dsn`.
+- `REPROQ_DATABASE_URL`: Standard PostgreSQL DSN (e.g., `postgres://user:pass@host:5432/dbname`). Optional if you provide `--dsn` or a config file with `dsn`.
 - `WORKER_ID`: Unique name for the worker node (defaults to hostname).
 - `PYTHONPATH`: Ensure your Django project is importable.
 - `REPROQ_WORKER_BIN`: Optional explicit path to the worker binary. If set, `python manage.py reproq install` writes the binary to this path.
@@ -75,7 +69,7 @@ The Go worker needs access to your database. It respects the following:
 - `REPROQ_QUEUE_DATABASES`: Map queue names (or globs) to Django database aliases for multi-DB routing.
 - `REPROQ_DEFAULT_DB_ALIAS`: Override the default database alias for queues (defaults to `default`).
 
-If `DATABASE_URL` is not set, `python manage.py reproq worker` derives a DSN from `settings.DATABASES["default"]` using `USER`, `PASSWORD`, `HOST`, `PORT`, and `NAME`.
+The SDK derives its DSN from the selected Django queue alias and verifies namespaced environment/configuration alignment; business DATABASE_URL is preserved for Python tasks.
 
 If you want all Reproq tables to live in a non-default database alias, set
 `REPROQ_DEFAULT_DB_ALIAS` and add the router to Django settings:
@@ -148,48 +142,43 @@ sudo systemctl enable --now reproq-schedule-<project>.timer
 ```
 
 ### Option B: pg_cron
-If your database supports `pg_cron`, install schedules with:
-```bash
-python manage.py reproq pg-cron --install
+
+Retain this provider when the database can host native scheduling and a separate
+beat process would be wasteful. A database administrator must install/preload
+pg_cron in the selected queue database, grant the application's role access,
+and configure native job connections/background workers. ReproQ never creates
+extensions or independently repairs queue DDL. Check the installed extension:
+
+```sql
+SELECT extversion FROM pg_catalog.pg_extension WHERE extname = 'pg_cron';
+SELECT current_setting('cron.timezone', true);
 ```
-Remove schedules with:
+
+Register definitions through `register_periodic(..., scheduler_provider="pg_cron")`;
+see the [canonical registration API](../README.md#-periodic-tasks). The native
+server zone must match each selected definition's CRON_TZ (bare expressions mean
+UTC). Reconcile explicitly after registration:
+
 ```bash
+python manage.py reproq pg-cron --install --dry-run
+python manage.py reproq pg-cron --install
+# Stops exact known owned jobs, never drops extensions/functions:
 python manage.py reproq pg-cron --remove
 ```
 
-Run `reproq pg-cron --install` after every deploy or migration so the cron
-jobs stay in sync with the `PeriodicTask` table. On platforms where `pg_cron`
-is not guaranteed, use `--if-supported` to skip cleanly:
-```bash
-python manage.py reproq pg-cron --install --if-supported
-```
+The adapter validates all selected jobs before writes and fails on an unknown
+command/name in its namespace. It only changes jobs in the current database
+owned by the current database role. `--if-supported` skips an unavailable native
+capability; invalid definitions/zones still fail. Removal works before schema2
+so legacy native jobs can be stopped before forward migration0003 retires their
+exact known old helper. Stop other schedulers/workers for that migration plan.
 
-Verify the extension is available:
-```sql
-SELECT * FROM pg_available_extensions WHERE name = 'pg_cron';
-```
-
-Create schedules in Django Admin or via the ORM:
-```python
-from django.utils import timezone
-from reproq_django.models import PeriodicTask
-
-PeriodicTask.objects.update_or_create(
-    name="Nightly cleanup",
-    defaults={
-        "cron_expr": "0 2 * * *",
-        "task_path": "myapp.tasks.nightly_cleanup",
-        "queue_name": "maintenance",
-        "next_run_at": timezone.now(),
-        "enabled": True,
-    },
-)
-```
-
-To run a schedule immediately, set `next_run_at` to `timezone.now()` or call the task's `enqueue()` method directly.
-
-For a "just works" setup, seed schedules in code via `post_migrate` and let
-beat/pg_cron pick them up automatically on deploy.
+Native jobs invoke the shared migration-owned enqueue function; they do not
+construct JSON or hashes. Native occurrence identity is the UTC execution minute,
+and missed/queued execution follows pg_cron. It is not Go's nominal-tick replay
+or synthetic next-run calculation. Check `cron.job_run_details` for actual run
+success, not just extension presence. The worker is still needed to execute
+Python tasks. Use task.enqueue() for an independent ad-hoc run.
 
 ## 4a. Reclaiming Orphaned Tasks
 
@@ -210,14 +199,16 @@ python manage.py collectstatic
 
 ## 6. Render Deployment Note
 
-When deploying on Render, run migrations during the pre-deploy step in this order:
+When deploying on Render, apply committed Django migrations during pre-deploy:
 
 ```bash
-python manage.py reproq migrate-worker
 python manage.py migrate --noinput
 ```
 
-This ensures Postgres extensions are enabled before Django applies its migrations.
+For a separate queue database, also run `python manage.py reproq migrate-worker
+--database <alias>`. It delegates to the same committed migrations. Existing
+legacy schemas require guarded adoption after producers/workers are quiescent;
+ordinary deployment does not perform an automatic repair.
 
 After migrations complete, enqueue any deploy-time tasks (such as deploy
 notifications or periodic task seeds). Enqueuing before schema setup can
@@ -242,12 +233,15 @@ post-start enqueue guarded by a deploy identifier (for example,
 
 **Schema mismatch or missing columns**
 - Run `python manage.py reproq migrate-worker` and re-check `python manage.py reproq doctor`.
-- If you used legacy array-based worker migrations, apply the JSONB conversion migration from the reproq-worker repo.
- - If you upgraded from a version that created the task_path guard as `NOT VALID`, validate it after backfill: `ALTER TABLE task_runs VALIDATE CONSTRAINT task_runs_task_path_not_empty;`
+- For legacy catalogs, use `reproq adopt-schema --inspect` and the explicit
+  audited adoption procedure. Do not apply retired Go SQL migrations or manual
+  DDL repairs.
 
 **DSN or config precedence confusion**
 - Use `python manage.py reproq config --explain` to see the winning values.
-- `--dsn` overrides `DATABASE_URL`, and `DATABASE_URL` is optional when a config file or flags supply the DSN.
+- Management commands derive empty DSNs from the selected Django queue database
+  and validate explicit file/environment targets. The standalone Go CLI accepts
+  `--dsn`; Django management commands use `--database`.
 
 **No logs available**
 - Ensure `REPROQ_LOGS_DIR` (or `--logs-dir`) is set on the worker.

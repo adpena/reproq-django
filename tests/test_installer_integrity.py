@@ -24,19 +24,25 @@ def installation(tmp_path, settings, monkeypatch):
     monkeypatch.setattr(reproq.platform, "machine", lambda: "x86_64")
     executions, builds = [], []
 
-    def execute(argv, **kwargs):
-        assert hashlib.sha256(Path(argv[0]).read_bytes()).hexdigest() == DIGEST
+    def execute(binary):
+        assert hashlib.sha256(Path(binary).read_bytes()).hexdigest() == DIGEST
         assert target.read_bytes() == b"previous worker"
-        assert kwargs == {"timeout": 30}
-        executions.append(argv)
-        return b"reproq v0.0.144"
+        executions.append([binary, 'capabilities'])
+        return json.dumps({"worker_version": "owned-unreleased", "schema_id": "reproq-schema-v2",
+                           "schema_version": 2, "executor_protocol": 2}).encode()
 
     def build(argv, **kwargs):
         builds.append((argv, kwargs))
         Path(argv[argv.index("-o") + 1]).write_bytes(BINARY)
 
-    monkeypatch.setattr(reproq.subprocess, "check_output", execute)
+    def canonical_build(source, destination, **kwargs):
+        builds.append((source, kwargs))
+        Path(destination).write_bytes(BINARY)
+        return DIGEST
+
+    monkeypatch.setattr('reproq_django.capabilities._capture_worker_capabilities', execute)
     monkeypatch.setattr(reproq.subprocess, "run", build)
+    monkeypatch.setattr("reproq_django.worker_install.build_verified_source", canonical_build)
     return target, executions, builds
 
 
@@ -151,7 +157,7 @@ def test_explicit_source_build_obeys_the_same_digest_before_execution(installati
 
 def test_failed_version_probe_preserves_target_and_cleans_staging(installation, monkeypatch):
     serve(monkeypatch)
-    monkeypatch.setattr(reproq.subprocess, "check_output", lambda *a, **k: (_ for _ in ()).throw(OSError("broken")))
+    monkeypatch.setattr('reproq_django.capabilities._capture_worker_capabilities', lambda binary: (_ for _ in ()).throw(OSError("broken")))
     with pytest.raises(CommandError, match="verification or publication"):
         reproq.Command().run_install({"sha256": DIGEST})
     assert_preserved(installation)

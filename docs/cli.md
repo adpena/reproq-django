@@ -9,6 +9,8 @@ This page documents `python manage.py reproq <subcommand>`. Use `--help` for the
 
 ## init
 Bootstrap a project by writing a config file, installing the worker, and running migrations.
+TOML is the default and uses Python's standard library reader. Explicit
+`--format yaml` requires PyYAML in the Django environment.
 
 ```bash
 python manage.py reproq init --format toml
@@ -33,7 +35,10 @@ python manage.py reproq worker --concurrency 20 --queues default,high
 
 Notes:
 - `--config` loads a YAML/TOML config file.
-- `--dsn` overrides `DATABASE_URL` (and `DATABASE_URL` is optional if a config file is supplied).
+- Empty queue DSNs derive from the selected Django queue database alias.
+  Explicit config/environment targets must match that alias. `DATABASE_URL`
+  remains the business connection inherited by Python tasks. `--dsn` is a
+  standalone Go option, not a Django management option.
 - Use `--database` to pick a Django database alias when you route queues to multiple databases.
 - If `ALLOWED_TASK_MODULES` is unset, the worker auto-configures it from discovered tasks.
 
@@ -86,7 +91,8 @@ python manage.py reproq install
 Useful flags: `--tag`, `--build`, `--source`.
 
 ## migrate-worker
-Apply the worker schema helpers and indexes that Django migrations cannot express.
+Apply the committed Django migrations to the selected queue database. This
+command does not run an independent schema initializer or repair tables.
 
 ```bash
 python manage.py reproq migrate-worker
@@ -209,23 +215,23 @@ python manage.py reproq prune-workers --older-than 10m
 
 Use `--database` or `--all-databases` for multi-DB setups.
 
-## prune-successful
-Delete successful task runs older than a cutoff.
-
-```bash
-python manage.py reproq prune-successful --older-than 30d
-```
-
-Use `--database` or `--all-databases` for multi-DB setups.
-
 ## prune
-Delete task runs by status and age.
+Delete terminal task history by status and age. Accepted statuses are SUCCESSFUL,
+FAILED and CANCELLED. Active and unknown statuses and negative limits are rejected.
+The former `prune-successful` command is retired; use `--statuses SUCCESSFUL`.
 
 ```bash
 python manage.py reproq prune --statuses SUCCESSFUL,FAILED --older-than 30d
 ```
 
-Use `--database` or `--all-databases` for multi-DB setups.
+Use `--database` or `--all-databases` for multi-DB setups. PostgreSQL cleanup locks
+bounded batches and skips locked rows, preserving tasks concurrently retried or
+claimed. Cleanup retains terminal records with active direct children or active
+members of the same workflow. `--limit 0` processes all currently eligible history in batches of 1000;
+`--dry-run` reports current eligibility, which may change before a later deletion.
+The Django command delegates to the compatible Go worker's `prune history`
+operation. It requires `operations.history_prune=1`; older binaries are rejected
+before the request. One canonical queue runtime owns locking and deletion.
 
 ## sync-recurring
 Sync code-defined recurring tasks into `periodic_tasks`.
@@ -238,8 +244,8 @@ python manage.py reproq sync-recurring
 Pause or resume a queue (prevents new claims while paused).
 
 ```bash
-python manage.py reproq pause-queue --queue maintenance
-python manage.py reproq resume-queue --queue maintenance
+python manage.py reproq pause-queue maintenance
+python manage.py reproq resume-queue maintenance
 ```
 
 ## systemd
@@ -251,11 +257,4 @@ environment file to activate it.
 python manage.py reproq systemd --user myuser --concurrency 20
 # Or generate a schedule timer (default: every minute)
 python manage.py reproq systemd --schedule --schedule-on-calendar "*-*-* *:*:00"
-```
-
-## stress-test
-Enqueue sample tasks for benchmarking throughput.
-
-```bash
-python manage.py reproq stress-test --count 500
 ```
