@@ -29,7 +29,7 @@ Reproq is split into two specialized components:
 | :--- | :--- |
 | Django | 6.x; Python 3.12–3.14 requires `Django>=6.0.9,!=6.1.0,!=6.1.1,<7.0`, and Python 3.15 requires `Django>=6.1.2,<7.0` |
 | Python | 3.12–3.15, checked locally with isolated locked environments |
-| Reproq Worker | Latest release (install/upgrade via `python manage.py reproq install` / `upgrade`) |
+| Reproq Worker | Release tested with this SDK (install/upgrade via `python manage.py reproq install` / `upgrade`) |
 
 Use `python manage.py reproq doctor` to verify schema, worker binary, and DSN alignment.
 The Go process reads its queue connection from `REPROQ_DATABASE_URL` or explicit
@@ -116,7 +116,7 @@ For reproducible deployment, pin both a release tag and the digest of the
 binary for the target OS and architecture:
 
 ~~~bash
-python manage.py reproq install --tag v0.0.144 --sha256 <platform-binary-sha256>
+python manage.py reproq install --tag v0.0.145 --sha256 <platform-binary-sha256>
 ~~~
 
 The same options work with init and upgrade. An explicit digest disables
@@ -222,7 +222,7 @@ Full reference (examples + exit codes): `docs/cli.md`.
 - **Bootstrap**: `init` writes `reproq.toml`, installs the worker, and runs migrations. Explicit YAML configuration requires the optional PyYAML reader in the Django environment.
 - **Config**: `config --explain` prints the effective config and its precedence.
 - **Doctor**: `doctor --strict` validates DSN, schema, worker binary, and allowlist.
-- **Upgrade**: `upgrade` fetches the latest worker release and optionally runs `migrate-worker`.
+- **Upgrade**: `upgrade` installs the release tested with this SDK and optionally applies the committed queue migrations.
 - **Allowlist**: `allowlist --write --config reproq.yaml` populates `allowed_task_modules`.
 - **Ops**: `status`/`stats`, `logs --id <result_id>`, `cancel --id <result_id>`.
 

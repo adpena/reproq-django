@@ -88,6 +88,12 @@ Download (or build) the worker binary.
 python manage.py reproq install
 ```
 
+Install, init, and upgrade default to the worker release tested with this SDK.
+They do not follow a mutable latest-release pointer. An explicit `--tag` selects
+another release; digest verification and provider compatibility checks still
+apply before atomic installation. Publish the paired worker assets before
+distributing a new SDK whose default tag requires them.
+
 Useful flags: `--tag`, `--build`, `--source`.
 
 ## migrate-worker
@@ -139,10 +145,12 @@ Precedence: defaults < config file < env vars < CLI flags
 ```
 
 ## upgrade
-Fetch the latest worker binary (or build from source) and optionally run `migrate-worker`.
+Install the worker release tested with this SDK (or build from source) and
+optionally apply the committed queue migrations. Use `--tag latest` explicitly
+to select the current GitHub release instead; compatibility checks still apply.
 
 ```bash
-python manage.py reproq upgrade --tag latest
+python manage.py reproq upgrade
 ```
 
 Useful flags: `--source`, `--build`, `--skip-worker-migrate`.

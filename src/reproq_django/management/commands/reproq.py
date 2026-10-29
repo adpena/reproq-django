@@ -24,12 +24,14 @@ from ...schema_contract import SchemaContractError, require_schema_contract
 from ...schema_adoption import SchemaAdoptionError, adopt_legacy_schema, inspect_legacy_schema
 from ...schema_inspection import SchemaInspectionError
 from ...capabilities import require_worker_capabilities
+from ...worker_install import DEFAULT_WORKER_TAG
 
 
 def _add_worker_install_arguments(parser):
     parser.add_argument("--source", type=str, help="Path to reproq-worker source")
     parser.add_argument("--build", action="store_true", help="Force building from source")
-    parser.add_argument("--tag", type=str, default="latest", help="GitHub release tag")
+    parser.add_argument("--tag", type=str, default=DEFAULT_WORKER_TAG,
+                        help="GitHub release tag (default: this SDK's tested compatible release)")
     parser.add_argument(
         "--sha256", type=str,
         help="Expected platform-specific binary SHA-256; download failures cannot fall back to a build.",
@@ -721,7 +723,9 @@ class Command(BaseCommand):
             success = False
             checksum = expected
             if not options.get("build"):
-                tag = options.get("tag", "latest")
+                tag = options.get("tag", DEFAULT_WORKER_TAG)
+                if not isinstance(tag, str) or not tag:
+                    raise CommandError("Worker release tag must be a non-empty string")
                 url = (
                     f"https://github.com/adpena/reproq-worker/releases/download/{quote(tag, safe='')}/{bin_name}"
                     if tag != "latest" else

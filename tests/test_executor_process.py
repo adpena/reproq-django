@@ -159,5 +159,7 @@ def test_foreground_management_replaces_parent_and_preserves_child_exit_status(p
     process = subprocess.Popen([sys.executable, "-c", source], cwd=root, env=environment,
                                stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     stdout, stderr = process.communicate(timeout=30)
-    assert process.returncode == 7, (stdout, stderr)
+    assert process.returncode == 7, (
+        f"stdout={stdout!r}\nstderr={stderr.decode('utf-8', errors='backslashreplace')}"
+    )
     assert int(identity.read_text()) == process.pid

@@ -169,3 +169,39 @@ def test_every_install_entry_point_accepts_the_same_integrity_arguments(subcomma
     options = parser.parse_args([subcommand, "--tag", "v0.0.144", "--sha256", DIGEST])
     assert options.sha256 == DIGEST
     assert options.tag == "v0.0.144"
+
+
+@pytest.mark.parametrize("subcommand", ["install", "init", "upgrade"])
+def test_every_install_entry_point_defaults_to_the_sdk_tested_worker(subcommand):
+    parser = reproq.Command().create_parser("manage.py", "reproq")
+    options = parser.parse_args([subcommand])
+    assert options.tag == reproq.DEFAULT_WORKER_TAG == "v0.0.145"
+
+
+def test_default_download_uses_an_immutable_compatible_release(installation, monkeypatch):
+    requests = serve(monkeypatch)
+    reproq.Command().run_install({"sha256": DIGEST})
+    assert requests == [
+        "https://github.com/adpena/reproq-worker/releases/download/v0.0.145/reproq-linux-amd64"
+    ]
+    assert len(installation[1]) == 1
+
+
+def test_mutable_latest_is_an_explicit_override(installation, monkeypatch):
+    requests = serve(monkeypatch)
+    parser = reproq.Command().create_parser("manage.py", "reproq")
+    options = vars(parser.parse_args(["install", "--tag", "latest", "--sha256", DIGEST]))
+    reproq.Command().run_install(options)
+    assert requests == [
+        "https://github.com/adpena/reproq-worker/releases/latest/download/reproq-linux-amd64"
+    ]
+    assert len(installation[1]) == 1
+
+
+@pytest.mark.parametrize("tag", [None, ""])
+def test_invalid_release_tag_preserves_installation_without_network(installation, monkeypatch, tag):
+    requests = serve(monkeypatch)
+    with pytest.raises(CommandError, match="non-empty string"):
+        reproq.Command().run_install({"tag": tag})
+    assert requests == []
+    assert_preserved(installation)
