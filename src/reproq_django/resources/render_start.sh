@@ -46,11 +46,6 @@ if [[ -n "$scheduler_mode_normalized" && "$scheduler_mode_normalized" != "beat" 
   beat_cmd=""
 fi
 
-if [[ "${LOW_MEMORY_MODE:-0}" == "1" ]]; then
-  log "LOW_MEMORY_MODE enabled; disabling reproq-beat (use pg_cron for schedules)."
-  beat_cmd=""
-fi
-
 if [[ -z "$web_cmd" ]]; then
   log "REPROQ_WEB_CMD is required (set it to your web process command)."
   exit 1

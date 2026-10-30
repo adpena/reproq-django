@@ -66,6 +66,18 @@ Choose a provider for each definition:
   the definition. This removes a persistent beat process, while execution still
   needs a worker.
 
+The packaged supervisor uses `REPROQ_SCHEDULER_MODE` to select its beat process:
+`beat` runs it, while `off` and `pg_cron` omit it. An unset mode keeps the existing
+default beat process. An explicit disabled `REPROQ_BEAT_CMD` still disables beat;
+a custom command runs only when the selected mode permits beat. Choosing
+`pg_cron` does not register schedules or install native jobs automatically.
+
+Migration note: `LOW_MEMORY_MODE` no longer overrides scheduler selection. If a
+deployment relied on that flag to stop beat, set `REPROQ_SCHEDULER_MODE=off` or
+select `pg_cron` after its explicit reconciliation. An explicit `beat` selection
+now remains active even with `LOW_MEMORY_MODE=1`. The flag's existing optional
+UI/proxy behavior is unchanged; it is not a scheduler provider setting.
+
 `--if-supported` reports a skip when native scheduling is unavailable; it does
 not start another scheduler. Review provider ownership before removing jobs or
 switching providers. Enqueue deployment tasks only after compatible workers are
