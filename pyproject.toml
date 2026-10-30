@@ -41,6 +41,13 @@ dev = [
 [tool.setuptools]
 package-dir = {"" = "src"}
 
+[tool.ruff]
+target-version = "py312"
+
+[tool.ruff.lint]
+# Preserve the existing lint policy when upstream changes its default rules.
+select = ["E4", "E7", "E9", "F"]
+
 [tool.setuptools.packages.find]
 where = ["src"]
 

@@ -42,8 +42,10 @@ Python 3.15 is validated by this project's checks against published Django 6.1.2
 and `psycopg[binary]` 3.3.6. As of October 28, 2026, Django's upstream
 [6.1.3 release notes](https://github.com/django/django/blob/5e109ba2895f0db9679c03a1b23f0b40c0b9310f/docs/releases/6.1.3.txt)
 plan official Python 3.15 support for that release. The current lock uses released
-packages, with no prerelease or source pins. Earlier Python versions use the
-[patched Django 6.0 branch](https://www.djangoproject.com/weblog/2026/oct/06/security-releases/).
+packages, with Django 6.1.2 on every supported interpreter and no prerelease or
+source pins. The package also permits the
+[patched Django 6.0 branch](https://www.djangoproject.com/weblog/2026/oct/06/security-releases/)
+on Python 3.12–3.14.
 The explicit 6.1.0 and 6.1.1 exclusions prevent an installed affected higher
 minor release from satisfying the older-Python security floor. They cover
 known published versions, rather than promising security for future releases.
@@ -520,7 +522,9 @@ Use `REPROQ_STATS_DATABASES=["*"]` to aggregate stats across all queue databases
 
 ## 🧪 Development
 
-We standardize on Python 3.12.x for local development.
+`.python-version` selects Python 3.14.10 for local development. The bootstrap
+installs the locked development dependencies; the compatibility checks still
+cover Python 3.12–3.15.
 
 ```bash
 bash scripts/dev_bootstrap.sh
