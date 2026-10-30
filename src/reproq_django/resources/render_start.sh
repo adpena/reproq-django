@@ -23,10 +23,11 @@ shutdown() {
 trap shutdown SIGTERM SIGINT
 
 restart_delay="${REPROQ_RESTART_DELAY_SECONDS:-5}"
-prestart_cmd="${REPROQ_PRESTART_CMD:-uv run python manage.py reproq check}"
+prestart_cmd="${REPROQ_PRESTART_CMD:-}"
 prestart_interval="${REPROQ_PRESTART_INTERVAL_SECONDS:-5}"
 prestart_max_wait="${REPROQ_PRESTART_MAX_WAIT_SECONDS:-120}"
-worker_cmd="${REPROQ_WORKER_CMD:-uv run python manage.py reproq worker --concurrency ${REPROQ_CONCURRENCY:-3} --metrics-addr ${METRICS_ADDR:-127.0.0.1:9090}}"
+worker_cmd="${REPROQ_WORKER_CMD:-}"
+default_beat=0
 scheduler_mode_normalized="$(printf '%s' "${REPROQ_SCHEDULER_MODE:-}" | tr '[:upper:]' '[:lower:]' | xargs)"
 if [[ -v REPROQ_BEAT_CMD ]]; then
   beat_cmd="${REPROQ_BEAT_CMD}"
@@ -37,18 +38,45 @@ if [[ -v REPROQ_BEAT_CMD ]]; then
       ;;
   esac
 else
-  beat_cmd="uv run python manage.py reproq beat --interval ${REPROQ_BEAT_INTERVAL:-30s}"
+  beat_cmd=""
+  default_beat=1
 fi
 web_cmd="${REPROQ_WEB_CMD:-}"
 
 if [[ -n "$scheduler_mode_normalized" && "$scheduler_mode_normalized" != "beat" ]]; then
   log "REPROQ_SCHEDULER_MODE=${REPROQ_SCHEDULER_MODE}; disabling reproq-beat."
   beat_cmd=""
+  default_beat=0
 fi
 
 if [[ -z "$web_cmd" ]]; then
   log "REPROQ_WEB_CMD is required (set it to your web process command)."
   exit 1
+fi
+
+if [[ -z "$prestart_cmd" || -z "$worker_cmd" || "$default_beat" -eq 1 ]]; then
+  # One selected runtime serves all default commands. Login shells may reset
+  # PATH, so retain its absolute interpreter rather than another UV parent.
+  if [[ -n "${VIRTUAL_ENV:-}" ]]; then
+    selected_python="${VIRTUAL_ENV}/bin/python"
+  elif ! selected_python="$(uv run python -c 'import sys; print(sys.executable)')"; then
+    log "could not resolve the default command interpreter with uv"
+    exit 1
+  fi
+  if [[ "$selected_python" != /* || ! -x "$selected_python" ]]; then
+    log "the selected default command interpreter must be an executable absolute path"
+    exit 1
+  fi
+  printf -v python_command '%q' "$selected_python"
+  if [[ -z "$prestart_cmd" ]]; then
+    prestart_cmd="exec ${python_command} manage.py reproq check"
+  fi
+  if [[ -z "$worker_cmd" ]]; then
+    worker_cmd="exec ${python_command} manage.py reproq worker --concurrency ${REPROQ_CONCURRENCY:-3} --metrics-addr ${METRICS_ADDR:-127.0.0.1:9090}"
+  fi
+  if [[ "$default_beat" -eq 1 ]]; then
+    beat_cmd="exec ${python_command} manage.py reproq beat --interval ${REPROQ_BEAT_INTERVAL:-30s}"
+  fi
 fi
 
 if [[ -n "$prestart_cmd" ]]; then

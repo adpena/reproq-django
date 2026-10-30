@@ -42,6 +42,17 @@ and [deployment guide](docs/deployment.md); do not launch unsupervised shell
 background jobs. `REPROQ_CONCURRENCY` is a supervisor input that becomes a worker
 CLI flag, rather than a native Go environment setting.
 
+Run the supervisor inside the selected project environment, for example through
+one outer UV invocation. Its default prestart, worker and beat commands reuse
+the absolute interpreter in VIRTUAL_ENV, including through login shells. Without
+an active environment it resolves the interpreter once with UV. A broken active
+environment fails rather than silently selecting another one. Custom commands
+are passed through unchanged; UV is unnecessary when every effective command is
+custom. Empty/unset prestart and worker commands retain their defaults, while an
+explicitly disabled beat command still omits beat. A custom web command should
+use the selected interpreter's absolute path to run the Gunicorn module, rather
+than nesting UV or depending on a login shell's PATH.
+
 Select the Django queue database with `--database` and configure queue routing
 through `REPROQ_QUEUE_DATABASES`. The management command derives an empty queue
 DSN from that alias and validates explicit file/environment targets against it.

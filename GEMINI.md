@@ -70,7 +70,7 @@ multiple databases is rejected rather than guessing the result's database.
   Legacy adoption requires full semantic catalog/history verification and an
   explicit audit receipt. Workers require the migration-owned schema contract;
   they must not create, repair, or migrate queue tables themselves.
-- Retain only three tags/releases at any time; delete older tags/releases and their artifacts.
+- Preserve published tags, releases, and assets for reproducibility. Retire obsolete current code and active artifacts instead; never move a released tag or replace published assets.
 
 ## Testing
 Always run tests via `uv` to ensure the locked environment is used:

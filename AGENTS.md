@@ -25,7 +25,7 @@ As an agent working on `reproq-django`, you must adhere to the following standar
   before an explicit audited reconciliation. This necessary forward migration
   policy supersedes the former one-file preference.
 - Update version strings together (`pyproject.toml` and `src/reproq_django/__init__.py`) when releasing.
-- Retain only three tags/releases at any time; delete older tags/releases and their artifacts.
+- Preserve published tags, releases, and assets for reproducibility. Retire obsolete current code and active artifacts instead; never move a released tag or replace published assets.
 
 ## 5. Render Env Var Safety
 - The Render API `PUT /services/{id}/env-vars` **replaces the entire env var set**.
