@@ -1,8 +1,9 @@
 # Reproq configuration (TOML)
 # Precedence: defaults < config file < env vars < CLI flags.
 
-# Global DSN used by worker and beat unless overridden below.
-dsn = "postgres://user:pass@localhost:5432/reproq?sslmode=disable"
+# Empty uses the selected Django queue database through manage.py reproq.
+# Set an explicit DSN when invoking the Go binary directly.
+dsn = ""
 
 [worker]
 # Optional DSN override for the worker.
@@ -17,7 +18,8 @@ poll_max_backoff = "5s"
 lease_seconds = 300
 heartbeat_seconds = 60
 reclaim_interval_seconds = 60
-python_bin = "python3"
+# Omit python_bin to use the interpreter running manage.py reproq.
+# Direct Go invocation defaults to python3; set an explicit executable to override.
 executor_module = "reproq_django.executor"
 payload_mode = "stdin" # stdin|file|inline
 max_payload_bytes = 1048576
@@ -25,7 +27,6 @@ max_stdout_bytes = 1048576
 max_stderr_bytes = 1048576
 logs_dir = "" # Empty disables persisted logs.
 exec_timeout = "1h"
-max_attempts_default = 3
 shutdown_timeout = "30s"
 priority_aging_factor = 60
 

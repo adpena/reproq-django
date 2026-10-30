@@ -1,201 +1,173 @@
+"""One-shot Python task provider, invoked by a fenced Go worker claim."""
+
 import argparse
 import asyncio
-import contextlib
 import inspect
 import io
 import json
 import os
 import signal
 import sys
-import traceback
+from uuid import UUID
 
-def setup_django(settings_module: str = None):
+from .protocol import bounded_traceback, encode_envelope, failure_envelope, read_payload
+
+
+class ExecutorTerminated(RuntimeError):
+    pass
+
+
+def setup_django(settings_module: str | None = None):
     if settings_module:
         os.environ["DJANGO_SETTINGS_MODULE"] = settings_module
     import django
+
     django.setup()
 
+
+def _diagnostic(error):
+    # Share the protocol formatter: no source-file reads, custom exception
+    # formatting or unbounded source lines on the separately drained log pipe.
+    print("[reproq executor]", bounded_traceback(error, 16384), file=sys.stderr)
+
+
+def _run_task(args, spec):
+    setup_django(args.settings)
+
+    from reproq_django.context import ExecutionClaim, TaskContext
+    from reproq_django.db import resolve_queue_db
+    from reproq_django.signals import task_finished, task_started
+
+    task_path = spec.get("task_path")
+    if not isinstance(task_path, str) or not task_path:
+        raise ValueError("The task payload must contain a task_path")
+    if args.task_path is not None and args.task_path != task_path:
+        raise ValueError("Task path override disagrees with the canonical payload")
+
+    context = TaskContext.from_claim(
+        ExecutionClaim(
+            result_id=args.result_id,
+            budget_attempt=args.attempt,
+            expected_task_path=task_path,
+            db_alias=resolve_queue_db(spec.get("queue_name")),
+            worker_id=args.worker_id,
+            lease_token=str(args.lease_token),
+        )
+    )
+    source_task = context.task_result.task
+    real_callable = source_task.func
+
+    def emit_signal(signal_obj, **payload):
+        for _, response in signal_obj.send_robust(
+            sender="reproq_django.executor", **payload
+        ):
+            if isinstance(response, Exception):
+                _diagnostic(response)
+
+    try:
+        # The row was loaded under the current claim fence. Its decoded
+        # arguments are cached for native sync/async result/context access.
+        task_args, task_kwargs = (
+            context.task_result.decoded_args,
+            context.task_result.decoded_kwargs,
+        )
+        emit_signal(task_started, task_context=context)
+        if source_task.takes_context:
+            result = real_callable(context, *task_args, **task_kwargs)
+        else:
+            result = real_callable(*task_args, **task_kwargs)
+        if inspect.isawaitable(result):
+
+            async def await_result():
+                return await result
+
+            result = asyncio.run(await_result())
+        encoded = encode_envelope({"ok": True, "return": result}, args.max_output_bytes)
+        context.save_metadata()
+        emit_signal(task_finished, task_context=context, ok=True)
+        return encoded
+    except Exception as error:
+        emit_signal(
+            task_finished, task_context=context, ok=False, error=type(error).__name__
+        )
+        raise
+
+
 def execute():
+    if sys.argv[1:] == ["--capabilities"]:
+        from .capabilities import executor_capabilities
+
+        # No settings imports, Django setup or database access during this probe.
+        print(
+            json.dumps(executor_capabilities(), sort_keys=True, separators=(",", ":"))
+        )
+        return
+    # Reserve the protocol pipe before setup/imports/hooks/task code can print.
+    # Native writes and child processes inherit stderr as their log stream.
+    sys.stdout.flush()
+    sys.stderr.flush()
+    protocol = os.fdopen(os.dup(sys.stdout.fileno()), "wb", buffering=0)
+    os.dup2(sys.stderr.fileno(), sys.stdout.fileno())
+
     parser = argparse.ArgumentParser(description="Reproq Django Task Executor")
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument("--payload-stdin", action="store_true")
-    group.add_argument("--payload-file", type=str)
-    group.add_argument("--payload-json", type=str)
-
-    parser.add_argument("--task-path", type=str)
-    parser.add_argument("--settings", type=str)
-    parser.add_argument("--result-id", type=str)
-    parser.add_argument("--attempt", type=int, default=1)
-
+    group.add_argument("--payload-file")
+    group.add_argument("--payload-json")
+    parser.add_argument("--task-path")
+    parser.add_argument("--settings")
+    parser.add_argument("--result-id", required=True)
+    parser.add_argument("--attempt", type=int, required=True)
+    parser.add_argument("--worker-id", required=True)
+    parser.add_argument("--lease-token", type=UUID, required=True)
+    parser.add_argument("--max-output-bytes", type=int, required=True)
+    parser.add_argument("--max-payload-bytes", type=int, required=True)
     args = parser.parse_args()
+    if args.max_output_bytes < len(b'{"ok":false}\n') or args.max_payload_bytes <= 0:
+        parser.error(
+            "Worker byte limits are too small for a complete protocol envelope"
+        )
+    if args.attempt <= 0 or not args.worker_id.strip():
+        parser.error("A positive attempt and nonempty worker owner are required")
 
-    def emit_result(payload, exit_code=None):
-        print(json.dumps(payload), file=sys.stdout)
-        sys.stdout.flush()
-        if exit_code is not None:
-            sys.exit(exit_code)
+    def terminated(sig, frame):
+        raise ExecutorTerminated(f"Task terminated by signal {sig}")
 
-    def debug_log(message):
-        if os.environ.get("REPROQ_EXECUTOR_DEBUG"):
-            print(f"[reproq executor] {message}", file=sys.stderr)
-
-    # Load payload
+    signal.signal(signal.SIGTERM, terminated)
+    signal.signal(signal.SIGINT, terminated)
+    exit_code = 0
     try:
         if args.payload_stdin:
-            payload_raw = sys.stdin.read()
+            spec = read_payload(sys.stdin.buffer, args.max_payload_bytes)
         elif args.payload_file:
-            with open(args.payload_file, "r") as f:
-                payload_raw = f.read()
+            with open(args.payload_file, "rb") as stream:
+                spec = read_payload(stream, args.max_payload_bytes)
         else:
-            payload_raw = args.payload_json
-        
-        spec = json.loads(payload_raw)
-    except Exception as e:
-        debug_log(f"Failed to parse payload: {e}")
-        emit_result(
-            {
-                "ok": False,
-                "exception_class": "PayloadError",
-                "message": f"Failed to parse payload: {str(e)}",
-            },
-            exit_code=1,
-        )
-
-    setup_django(args.settings or spec.get("django", {}).get("settings_module"))
-
-    from django.utils.module_loading import import_string
-    from reproq_django.context import TaskContext
-    from reproq_django.db import resolve_queue_db
-    from reproq_django.models import TaskRun
-    from reproq_django.serialization import decode_args_kwargs, DeserializationError
-    from reproq_django.signals import task_finished, task_started
-    
-    task_path = args.task_path or spec.get("task_path")
-    try:
-        callable_task = import_string(task_path)
-    except Exception as e:
-        debug_log(f"Failed to import task {task_path}: {e}")
-        emit_result(
-            {
-                "ok": False,
-                "exception_class": "ImportError",
-                "message": f"Failed to import task {task_path}: {str(e)}",
-            },
-            exit_code=1,
-        )
-
-    if hasattr(callable_task, "func"):
-        real_callable = callable_task.func
-    elif hasattr(callable_task, "run"):
-        real_callable = callable_task.run
-    else:
-        real_callable = callable_task
-
-    queue_name = spec.get("queue_name")
-    db_alias = resolve_queue_db(queue_name)
-    try:
-        existing_metadata = TaskRun.objects.using(db_alias).values_list(
-            "metadata_json", flat=True
-        ).get(result_id=args.result_id)
-        if existing_metadata is None:
-            existing_metadata = {}
-    except TaskRun.DoesNotExist:
-        existing_metadata = {}
-    except Exception as exc:
-        debug_log(f"Failed to load metadata: {exc}")
-        existing_metadata = {}
-
-    context = TaskContext(
-        result_id=args.result_id,
-        attempt=args.attempt,
-        task_path=task_path,
-        queue_name=queue_name,
-        priority=spec.get("priority"),
-        db_alias=db_alias,
-        metadata=existing_metadata,
-    )
-
-    # Signal handling
-    def signal_handler(sig, frame):
-        debug_log(f"Task terminated by signal {sig}")
-        emit_result(
-            {
-                "ok": False,
-                "exception_class": "Terminated",
-                "message": f"Task terminated by signal {sig}",
-            },
-            exit_code=1,
-        )
-    
-    signal.signal(signal.SIGTERM, signal_handler)
-    signal.signal(signal.SIGINT, signal_handler)
-
-    def _emit_signal(signal_obj, **payload):
-        try:
-            signal_obj.send(sender="reproq_django.executor", **payload)
-        except Exception as exc:
-            debug_log(f"Signal failed: {exc}")
-
-    try:
-        raw_args = spec.get("args", [])
-        raw_kwargs = spec.get("kwargs", {})
-        try:
-            task_args, task_kwargs = decode_args_kwargs(raw_args, raw_kwargs, using=db_alias)
-        except DeserializationError as exc:
-            raise RuntimeError(f"Failed to deserialize arguments: {exc}") from exc
-        debug_log(f"Executing task {task_path} (result_id={args.result_id}, attempt={args.attempt})")
-
-        stdout_capture = io.StringIO()
-        with contextlib.redirect_stdout(stdout_capture):
-            if spec.get("takes_context") or getattr(callable_task, "takes_context", False):
-                _emit_signal(task_started, task_context=context)
-                result_val = real_callable(context, *task_args, **task_kwargs)
-            else:
-                _emit_signal(task_started, task_context=context)
-                result_val = real_callable(*task_args, **task_kwargs)
-
-            # Support for async tasks
-            if inspect.iscoroutine(result_val):
-                result_val = asyncio.run(result_val)
-
-        captured_stdout = stdout_capture.getvalue()
-        if captured_stdout:
-            print(
-                f"[reproq executor] Task wrote {len(captured_stdout)} bytes to stdout; suppressed.",
-                file=sys.stderr,
+            spec = read_payload(
+                io.BytesIO(args.payload_json.encode("utf-8")), args.max_payload_bytes
             )
-            debug_log(f"Captured stdout:\n{captured_stdout}")
-        
-        # Verify serializability
-        try:
-            json.dumps(result_val)
-        except TypeError:
-            raise TypeError(f"Return value of type {type(result_val)} is not JSON serializable")
+        encoded = _run_task(args, spec)
+    except Exception as error:
+        _diagnostic(error)
+        encoded = failure_envelope(error, args.max_output_bytes)
+        exit_code = 1
+    finally:
+        signal.signal(signal.SIGTERM, signal.SIG_DFL)
+        signal.signal(signal.SIGINT, signal.SIG_DFL)
+    # Never publish a partial success prefix if encoding fails.
+    try:
+        remaining = memoryview(encoded)
+        while remaining:
+            written = protocol.write(remaining)
+            if not written:
+                raise OSError(
+                    "Protocol stream closed before the complete result was written"
+                )
+            remaining = remaining[written:]
+    finally:
+        protocol.close()
+    raise SystemExit(exit_code)
 
-        try:
-            context.save_metadata()
-        except Exception as exc:
-            debug_log(f"Failed to save metadata: {exc}")
-
-        _emit_signal(task_finished, task_context=context, ok=True)
-        emit_result({"ok": True, "return": result_val})
-
-    except Exception as e:
-        debug_log(f"Task execution failed: {e}")
-        try:
-            context.save_metadata()
-        except Exception as exc:
-            debug_log(f"Failed to save metadata: {exc}")
-        _emit_signal(task_finished, task_context=context, ok=False, error=str(e))
-        emit_result(
-            {
-                "ok": False,
-                "exception_class": e.__class__.__name__,
-                "message": str(e),
-                "traceback": traceback.format_exc(),
-            },
-            exit_code=1,
-        )
 
 if __name__ == "__main__":
     execute()

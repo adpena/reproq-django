@@ -9,9 +9,7 @@ if ! command -v uv >/dev/null 2>&1; then
   exit 1
 fi
 
-uv venv .venv --python 3.12
-source .venv/bin/activate
-uv pip install -e ".[dev]"
-uv run pytest
+uv sync --locked --extra dev --python "$(cat .python-version)"
+uv run --locked pytest
 
 echo "Done. Run tests with: uv run pytest"

@@ -1,10 +1,7 @@
 name: Django CI
 
 on:
-  push:
-    branches: [ main ]
-  pull_request:
-    branches: [ main ]
+  workflow_dispatch:
 
 jobs:
   test:
@@ -20,9 +17,7 @@ jobs:
 
     - name: Install dependencies
       run: |
-        python -m pip install --upgrade pip
-        pip install -e .
-        pip install "django>=6.0,<7.0" psycopg[binary]
+        python -m pip install "uv==0.13.6"
 
     - name: Run Tests
-      run: python tests/test_backend.py
+      run: make check

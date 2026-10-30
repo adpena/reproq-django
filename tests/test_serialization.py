@@ -27,14 +27,14 @@ class TestSerialization(unittest.TestCase):
 
     def test_encode_decode_timedelta(self):
         args, kwargs = encode_args_kwargs((timedelta(seconds=30),), {"delay": timedelta(minutes=1)})
-        decoded_args, decoded_kwargs = decode_args_kwargs(args, kwargs, using="default")
+        decoded_args, decoded_kwargs = decode_args_kwargs(args, kwargs)
         self.assertEqual(decoded_args[0], timedelta(seconds=30))
         self.assertEqual(decoded_kwargs["delay"], timedelta(minutes=1))
 
     def test_encode_decode_model(self):
         run = TaskRun.objects.create(spec_json={}, spec_hash="m" * 64)
         args, kwargs = encode_args_kwargs((run,), {})
-        decoded_args, decoded_kwargs = decode_args_kwargs(args, kwargs, using="default")
+        decoded_args, decoded_kwargs = decode_args_kwargs(args, kwargs)
         self.assertEqual(decoded_kwargs, {})
         self.assertEqual(decoded_args[0].pk, run.pk)
 

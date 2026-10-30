@@ -1,0 +1,4 @@
+include Makefile uv.lock
+include contracts/spec_hash.json contracts/spec_hash.sha256
+include contracts/cron_schedules.json
+recursive-include tests *.py

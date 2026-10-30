@@ -1,8 +1,10 @@
 from decimal import Decimal
+from datetime import datetime, timezone
 from pathlib import Path
 from uuid import UUID
 
 from reproq_django.serialization import canonical_json, spec_hash_for
+from reproq_django.specs import build_spec
 
 
 def test_spec_hash_contract():
@@ -16,10 +18,11 @@ def test_spec_hash_contract():
     spec = {
         "v": 1,
         "task_path": "contracts.example_task",
+        "backend_alias": "default",
         "args": [1, {"nested": True}],
         "kwargs": {
             "amount": Decimal("12.34"),
-            "token": UUID("123e4567-e89b-12d3-a456-426614174000"),
+            "token": "task-token-example",
             "notes": "hello",
         },
         "takes_context": False,
@@ -36,3 +39,14 @@ def test_spec_hash_contract():
     canonical = canonical_json(spec)
     assert canonical == expected_canonical
     assert spec_hash_for(spec) == expected_hash
+    generated = build_spec(
+        task_path=spec["task_path"], backend_alias="default", args=spec["args"], kwargs=spec["kwargs"],
+        queue_name="default", priority=5, lock_key="user:123", concurrency_key="account:42",
+        concurrency_limit=2, run_after=datetime(2025, 1, 1, 12, tzinfo=timezone.utc),
+        timeout_seconds=900, max_attempts=3, code_ref="abc123", pip_lock_hash="deadbeef",
+    )
+    assert generated.text == expected_canonical and generated.sha256 == expected_hash
+
+
+def test_typed_uuid_serialization():
+    assert canonical_json({"token": UUID(int=1)}) == '{"token":"00000000-0000-0000-0000-000000000001"}'

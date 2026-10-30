@@ -1,9 +1,12 @@
 name: Release
 
 on:
-  push:
-    tags:
-      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing reviewed version tag to build as a draft release
+        required: true
+        type: string
 
 permissions:
   contents: write
@@ -13,18 +16,39 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Verify reviewed source matches the existing tag
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          git show-ref --verify "refs/tags/$RELEASE_TAG"
+          test "$(git rev-parse "refs/tags/$RELEASE_TAG^{commit}")" = "$(git rev-parse HEAD)"
+          test -z "$(git status --porcelain --untracked-files=all)"
+          if git ls-files -v | grep -Eq '^[a-zS] '; then
+            echo "Hidden Git index flags are not allowed in release builds." >&2
+            exit 1
+          fi
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
       - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          python -m pip install -e ".[dev]" build
+        run: python -m pip install "uv==0.13.6"
+      - name: Verify matching versions
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: >-
+          uv run --locked --extra dev python -c
+          'import os, sys, tomllib, reproq_django;
+          version = tomllib.load(open("pyproject.toml", "rb"))["project"]["version"];
+          sys.exit(0 if os.environ["RELEASE_TAG"] == "v" + version and
+          reproq_django.__version__ == version else "Tag and package versions must match")'
       - name: Run tests
-        run: pytest
+        run: make check
       - name: Build package
-        run: python -m build
-      - uses: softprops/action-gh-release@v2
-        with:
-          files: dist/*
-          generate_release_notes: true
+        run: uv build
+      - name: Create draft without replacing an existing release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: gh release create "$RELEASE_TAG" --verify-tag --draft --generate-notes dist/*
