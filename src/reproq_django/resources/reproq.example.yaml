@@ -22,7 +22,8 @@ worker:
   lease_seconds: 300
   heartbeat_seconds: 60
   reclaim_interval_seconds: 60
-  python_bin: "python3"
+  # Omit python_bin to use the interpreter running manage.py reproq.
+  # Direct Go invocation defaults to python3; set an explicit executable to override.
   executor_module: "reproq_django.executor"
   payload_mode: "stdin" # stdin|file|inline
   max_payload_bytes: 1048576

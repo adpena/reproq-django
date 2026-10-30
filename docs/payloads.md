@@ -52,7 +52,7 @@ Reproq also supports rich argument serialization:
 
 ## 4. Executor Settings Resolution
 
-The executor (`python -m reproq_django.executor`) resolves settings in this order:
+The configured executor (`-m reproq_django.executor`) resolves settings in this order:
 - `--settings` CLI flag (manual runs only).
 - `spec["django"]["settings_module"]` (if provided in the payload).
 - `DJANGO_SETTINGS_MODULE` environment variable (typical production setup).
@@ -74,7 +74,7 @@ The executor writes only the JSON result envelope to stdout. Task `print()` outp
 
 ## 7. Worker/Executor Contract
 
-The Go worker invokes `python -m reproq_django.executor` and sends a canonical JSON spec via stdin (or a file). The executor returns a JSON result envelope on stdout.
+The Go worker invokes its configured Python executable with `-m reproq_django.executor` and sends a canonical JSON spec via stdin (or a file). The executor returns a JSON result envelope on stdout.
 
 ### Spec Payload (input)
 Common fields in the spec JSON:
@@ -144,8 +144,12 @@ STDERR:
 The `logs_uri` value can be a local file path or an HTTP/HTTPS URL. Use:
 
 ```bash
-python manage.py reproq logs --id 1234 --tail 200
-python manage.py reproq logs --id 1234 --show-path
+uv run python manage.py reproq logs --id 1234 --tail 200
+uv run python manage.py reproq logs --id 1234 --show-path
 ```
 
 Use `--max-bytes` to cap the read size. If `logs_uri` is empty, no logs were captured or persisted.
+
+Unreleased selected-runtime binding and portable configuration are defined in
+the [canonical configuration contract](../README.md#unreleased-executor-python-selection).
+The executor protocol and payload schema remain unchanged.

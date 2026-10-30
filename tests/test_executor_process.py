@@ -137,7 +137,8 @@ def test_foreground_management_replaces_parent_and_preserves_child_exit_status(p
     worker = root / "owned-worker"
     identity = root / "foreground-pid.txt"
     capabilities = json.dumps({'worker_version': 'owned', 'schema_id': 'reproq-schema-v2',
-                               'schema_version': 2, 'executor_protocol': 2})
+                               'schema_version': 2, 'executor_protocol': 2,
+                               'operations': {'worker_python_bin': 1}})
     business_dsn = 'postgresql://owned@127.0.0.1/business'
     queue_dsn = 'postgresql://owned@127.0.0.1/queue'
     worker.write_text('#!/bin/sh\nif [ "$1" = capabilities ]; then\n'
@@ -163,3 +164,47 @@ def test_foreground_management_replaces_parent_and_preserves_child_exit_status(p
         f"stdout={stdout!r}\nstderr={stderr.decode('utf-8', errors='backslashreplace')}"
     )
     assert int(identity.read_text()) == process.pid
+
+
+@pytest.mark.skipif(os.name != "posix", reason="Native Windows interpreter selection is qualified separately")
+def test_foreground_binds_real_selected_python_with_spaces_despite_another_ambient_python(provider):
+    from reproq_django.capabilities import executor_capabilities
+
+    root, base_env = provider
+    environment_alias = root / "selected environment with spaces"
+    environment_alias.symlink_to(sys.prefix, target_is_directory=True)
+    selected = environment_alias / "bin/python"
+    ambient = root / "ambient-tools"
+    ambient.mkdir()
+    ambient_marker = root / "ambient-was-invoked"
+    other = ambient / "python3"
+    other.write_text('#!/bin/sh\nprintf wrong > ' + shlex.quote(str(ambient_marker)) + '\nexit 19\n')
+    other.chmod(0o755)
+    record = root / "selected-executor.json"
+    response = {**executor_capabilities(), "worker_version": "owned", "operations": {"worker_python_bin": 1}}
+    worker = root / "binding-worker"
+    probe = (
+        "import json,subprocess,sys; from pathlib import Path; "
+        "args=sys.argv[1:]; python=args[args.index('--python-bin')+1]; "
+        "result=subprocess.run([python,'-m','reproq_django.executor','--capabilities'],capture_output=True,timeout=10); "
+        f"Path({str(record)!r}).write_text(json.dumps({{'python':python,'exit':result.returncode,'capabilities':json.loads(result.stdout)}})); "
+        "raise SystemExit(result.returncode)"
+    )
+    worker.write_text('#!/bin/sh\nif [ "$1" = capabilities ]; then\nprintf "%s\\n" '
+                      + shlex.quote(json.dumps(response)) + '\nexit 0\nfi\nexec '
+                      + shlex.quote(sys.executable) + ' -c ' + shlex.quote(probe) + ' "$@"\n')
+    worker.chmod(0o755)
+    source = (
+        "import django; django.setup(); from django.core.management import call_command; "
+        "from django.db.backends.base.base import BaseDatabaseWrapper; "
+        "from reproq_django.management.commands.reproq import Command; "
+        "Command.get_dsn=lambda self,alias=None:'postgresql://owned@127.0.0.1:1/never_connect'; "
+        "BaseDatabaseWrapper.ensure_connection=lambda self: (_ for _ in ()).throw(AssertionError('Unexpected database access')); "
+        "call_command('reproq','worker','--allowed-task-modules','owned_tasks',skip_checks=True)"
+    )
+    environment = {**base_env, "REPROQ_WORKER_BIN": str(worker), "PATH": str(ambient)}
+    result = subprocess.run([str(selected), "-c", source], cwd=root, env=environment, capture_output=True, timeout=30)
+    assert result.returncode == 0, result.stderr
+    observed = json.loads(record.read_text())
+    assert observed == {"python": str(selected), "exit": 0, "capabilities": executor_capabilities()}
+    assert not ambient_marker.exists()

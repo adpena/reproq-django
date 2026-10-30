@@ -37,11 +37,17 @@ def require_worker_capabilities(binary):
                 raise ValueError('Incompatible provider contract')
         if not isinstance(value.get('worker_version'), str) or not value['worker_version']:
             raise ValueError('Worker version missing')
+        operations = value.get('operations')
+        if (not isinstance(operations, dict)
+                or type(operations.get('worker_python_bin')) is not int
+                or operations['worker_python_bin'] != 1):
+            raise ValueError('Worker lacks explicit executor Python selection')
         return value
     except (OSError, subprocess.SubprocessError, ValueError, RecursionError) as error:
         # Do not include child output or command/environment in the diagnostic.
         raise ValueError(
             'Worker is incompatible with this SDK. Install a reviewed worker '
-            f'with schema {SCHEMA_VERSION} and executor protocol {EXECUTOR_PROTOCOL}; '
+            f'with schema {SCHEMA_VERSION}, executor protocol {EXECUTOR_PROTOCOL}, '
+            'and worker_python_bin operation version1; '
             'no queue runtime was started and no task was claimed.'
         ) from error

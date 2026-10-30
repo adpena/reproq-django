@@ -29,7 +29,8 @@ def installation(tmp_path, settings, monkeypatch):
         assert target.read_bytes() == b"previous worker"
         executions.append([binary, 'capabilities'])
         return json.dumps({"worker_version": "owned-unreleased", "schema_id": "reproq-schema-v2",
-                           "schema_version": 2, "executor_protocol": 2}).encode()
+                           "schema_version": 2, "executor_protocol": 2,
+                           "operations": {"worker_python_bin": 1}}).encode()
 
     def build(argv, **kwargs):
         builds.append((argv, kwargs))

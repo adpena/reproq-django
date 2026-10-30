@@ -23,7 +23,7 @@ pytestmark = pytest.mark.skipif(
 
 def helper(tmp_path, mode):
     binary = tmp_path / "owned-capability-worker"
-    payload = json.dumps({**executor_capabilities(), "worker_version": "owned"})
+    payload = json.dumps({**executor_capabilities(), "worker_version": "owned", "operations": {"worker_python_bin": 1}})
     binary.write_text(
         "#!" + sys.executable + "\n"
         "import json,os,subprocess,sys,time\n"

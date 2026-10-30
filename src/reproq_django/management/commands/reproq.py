@@ -62,6 +62,8 @@ class Command(BaseCommand):
         worker_parser.add_argument("--allowed-task-modules", type=str, default=None, help="Comma-separated task module allow-list")
         worker_parser.add_argument("--logs-dir", type=str, default=None, help="Directory to persist stdout/stderr logs")
         worker_parser.add_argument("--payload-mode", type=str, default=None, help="Payload mode: stdin|file|inline")
+        worker_parser.add_argument("--python-bin", type=str, default=None,
+                                   help="Executor Python executable (default: this Django interpreter unless configured)")
         worker_parser.add_argument("--metrics-port", type=int, default=None, help="Port to serve Prometheus metrics")
         worker_parser.add_argument("--metrics-addr", type=str, default=None, help="Address to serve health/metrics")
         worker_parser.add_argument("--metrics-auth-token", type=str, default=None, help="Bearer token required for health/metrics")
@@ -432,6 +434,16 @@ class Command(BaseCommand):
                 self.stderr.write(self.style.ERROR(f"   Resolved path: {resolved_bin}"))
             failed = True
 
+        config_path = self._resolve_config_path(None)
+        if config_path and not os.path.exists(config_path):
+            raise CommandError(f"Config file not found: {config_path}")
+        file_config = self._load_config_file(config_path)[0] if config_path else None
+        env_config, errors = self._build_env_config()
+        if errors:
+            raise CommandError("; ".join(errors))
+        effective, sources = self._effective_config(file_config, env_config)
+        self.stdout.write(f"Executor Python: {effective['worker']['python_bin']} ({sources['worker.python_bin']})")
+
         dsn = self.get_dsn(db_alias)
         if dsn:
             self.stdout.write(self.style.SUCCESS("✅ Database DSN detected (Django DATABASES)."))
@@ -547,6 +559,7 @@ class Command(BaseCommand):
             fail(error)
 
         effective, sources = self._effective_config(file_config, env_config)
+        self.stdout.write(f"Executor Python: {effective['worker']['python_bin']} ({sources['worker.python_bin']})")
         settings_dsn = self.get_dsn(db_alias)
         if settings_dsn:
             self._apply_settings_dsn(effective, sources, settings_dsn, "settings")
@@ -1183,7 +1196,7 @@ WantedBy=timers.target
         except ValueError as error:
             raise CommandError(str(error)) from error
         runtime_names = (
-            "concurrency", "queues", "allowed_task_modules", "logs_dir", "payload_mode",
+            "concurrency", "queues", "allowed_task_modules", "logs_dir", "payload_mode", "python_bin",
             "metrics_port", "metrics_addr", "metrics_auth_token", "metrics_allow_cidrs",
             "metrics_tls_cert", "metrics_tls_key", "metrics_tls_client_ca",
             "metrics_auth_limit", "metrics_auth_window", "metrics_auth_max_entries",
@@ -1208,6 +1221,14 @@ WantedBy=timers.target
         if errors:
             raise CommandError("; ".join(errors))
         effective, sources = self._effective_config(file_config, env_config)
+        if cmd == "worker":
+            python_bin = overrides.get("python_bin", effective["worker"]["python_bin"])
+            if not isinstance(python_bin, str) or not python_bin.strip():
+                raise CommandError("worker.python_bin must name a Python executable")
+            if "python_bin" not in overrides and sources["worker.python_bin"] == "default":
+                # Explicit files and CLI values remain operator authority. Only
+                # the Django default binds the executor to this selected runtime.
+                overrides["python_bin"] = python_bin
         if dsn:
             self._apply_settings_dsn(effective, sources, dsn, "settings")
         effective_dsn = self._resolve_effective_dsn(effective, cmd)
@@ -1806,7 +1827,7 @@ WantedBy=timers.target
                 "lease_seconds": 300,
                 "heartbeat_seconds": 60,
                 "reclaim_interval_seconds": 60,
-                "python_bin": "python3",
+                "python_bin": sys.executable,
                 "executor_module": "reproq_django.executor",
                 "payload_mode": "stdin",
                 "max_payload_bytes": 1048576,
@@ -1843,6 +1864,9 @@ WantedBy=timers.target
             self._merge_config(config, file_config, "config", sources)
         if env_config:
             self._merge_config(config, env_config, "env", sources)
+        python_bin = config["worker"]["python_bin"]
+        if not isinstance(python_bin, str) or not python_bin.strip():
+            raise CommandError("worker.python_bin must name a Python executable")
         return config, sources
 
     def _build_env_config(self):

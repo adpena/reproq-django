@@ -4,7 +4,7 @@
 This project is the Django 6.0 Tasks backend for the Go-based `reproq-worker`.
 
 ## Binary Management
-The project uses a unified management command `python manage.py reproq` to handle the worker lifecycle.
+The project uses a unified management command `uv run python manage.py reproq` to handle the worker lifecycle.
 
 ### Install Workflow
 The installer requires an explicit or published platform digest, verifies the
@@ -32,6 +32,9 @@ identity/catch-up differs from Go nominal-tick coalescing; see README.
 
 ## Runtime Contract
 The worker and SDK must agree on schema2/executor protocol2 before claims.
+Unreleased executor binding requires worker_python_bin operation version1. Django's default
+executor is its UV-selected sys.executable, passed with --python-bin; explicit
+file/CLI choices take precedence. Portable init templates omit python_bin.
 Every claim has a fresh UUID lease token; RUNNING owner/token/unexpired DB lease
 fence heartbeat, completion and Python metadata writes. Task logs go to stderr;
 stdout is one complete bounded UTF-8 JSON envelope. Invalid/oversized results
@@ -85,9 +88,9 @@ then apply changes so you do not wipe required keys.
 If you are an AI agent analyzing this project:
 - **CLI Entry Point**: `src/reproq_django/management/commands/reproq.py`. This is the single source of truth for worker management.
 - **Task Schema**: Defined in `src/reproq_django/models.py`. Key fields are `spec_json` (payload), `spec_hash` (deduplication), and `lock_key` (concurrency).
-- **Execution**: The worker invokes `python -m reproq_django.executor`. See `executor.py` for the stdin/stdout protocol logic.
+- **Execution**: The worker invokes its configured Python executable with `-m reproq_django.executor`. See `executor.py` for the stdin/stdout protocol logic.
 - **Workflows**: See `workflows.py` for Chain/Group implementation details.
-- **Initialization**: Always recommend `python manage.py reproq init` for setup.
+- **Initialization**: Always recommend `uv run python manage.py reproq init` for setup.
 
 ## Task Schema Additions
 Recent additions include:

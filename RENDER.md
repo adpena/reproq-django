@@ -53,6 +53,14 @@ explicitly disabled beat command still omits beat. A custom web command should
 use the selected interpreter's absolute path to run the Gunicorn module, rather
 than nesting UV or depending on a login shell's PATH.
 
+**Unreleased interpreter binding:** Publish matching Go and SDK artifacts before
+deploying this change. The Django worker passes that selected interpreter to Go's executor through
+`--python-bin`, including its startup capability check and task processes.
+Explicit `worker.python_bin` config or CLI values remain operator choices.
+Omit the optional file value to inherit the active Django runtime; no environment
+path is written by `init`. A compatible worker advertises `worker_python_bin`
+operation version1, which prestart and doctor verify before startup.
+
 Select the Django queue database with `--database` and configure queue routing
 through `REPROQ_QUEUE_DATABASES`. The management command derives an empty queue
 DSN from that alias and validates explicit file/environment targets against it.

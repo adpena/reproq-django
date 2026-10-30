@@ -29,9 +29,9 @@ Reproq is split into two specialized components:
 | :--- | :--- |
 | Django | 6.x; Python 3.12–3.14 requires `Django>=6.0.9,!=6.1.0,!=6.1.1,<7.0`, and Python 3.15 requires `Django>=6.1.2,<7.0` |
 | Python | 3.12–3.15, checked locally with isolated locked environments |
-| Reproq Worker | Release tested with this SDK (install/upgrade via `python manage.py reproq install` / `upgrade`) |
+| Reproq Worker | Release tested with this SDK (install/upgrade via `uv run python manage.py reproq install` / `upgrade`) |
 
-Use `python manage.py reproq doctor` to verify schema, worker binary, and DSN alignment.
+Use `uv run python manage.py reproq doctor` to verify schema, worker binary, and DSN alignment.
 The Go process reads its queue connection from `REPROQ_DATABASE_URL` or explicit
 configuration/flags. Generic `DATABASE_URL` remains Django's business connection;
 the SDK derives queue connections from the selected Django alias and preserves
@@ -55,11 +55,23 @@ Package builds require `setuptools>=84.1.0` and `wheel>=0.46.2`.
 
 ## ⚡ Quickstart
 
+**Unreleased current branch:** The public worker release is v0.0.144. This SDK
+branch requires the matching v0.0.145 candidate and its `worker_python_bin:1`
+capability; those assets are not published yet. Current-branch development uses
+a reviewed local SDK/worker pair through `REPROQ_WORKER_BIN`. Worker v0.0.144
+does not satisfy this new contract. The download examples below apply only
+after matching Go and SDK artifacts are published.
+
 ### 1. Install
+For current-branch development, add the reviewed local SDK to the Django project:
+
 ```bash
-uv pip install reproq-django
-# or: pip install reproq-django
+uv add --editable /path/to/reviewed/reproq-django
 ```
+
+After the matching v0.1.531 tag is published on GitHub, install that version with
+`uv add "reproq-django @ git+https://github.com/adpena/reproq-django.git@v0.1.531"`.
+This is a future GitHub distribution example; it does not require a PyPI package.
 
 ### 2. Configure Settings
 Add `reproq_django` to your `INSTALLED_APPS` and configure the `TASKS` backend:
@@ -97,28 +109,36 @@ def send_welcome_email(user_id: int) -> str:
 ### 4. Bootstrap (Recommended)
 Bootstrap writes a config file, installs the worker binary, and applies committed
 Django migrations. Queue schema changes have one owner: this package's migrations.
+For current-branch development, select the reviewed local worker and skip the
+unavailable hosted download:
+
 ```bash
-python manage.py reproq init
+export REPROQ_WORKER_BIN=/absolute/path/to/reviewed/reproq
+uv run python manage.py reproq init --skip-install
 ```
 Use `--format toml` or `--skip-install` as needed. `--skip-migrate` skips the
 project-wide invocation; `--skip-worker-migrate` skips the separate ReproQ-only
 invocation. Both invocations use the same committed Django migrations. Use both
 flags when migration execution must be deferred.
 
-### 5. Install the Worker (Standalone)
-If you want only the worker binary:
+### 5. Download the Worker (After Matching Publication)
+Once matching Go and SDK releases are published, the SDK installer selects its
+tested compatible tag. The v0.0.145 download is a future example until then:
+
 ```bash
-python manage.py reproq install
+uv run python manage.py reproq install
 ```
-*This command detects your OS/Architecture and fetches the correct pre-built binary from GitHub. No Go installation required!*
+The installer detects the OS/architecture and fetches that tag's pre-built
+binary from GitHub. Current-branch local development uses the selector above.
 
 Downloads must match the publisher's checksum sidecar or GitHub release-asset
 SHA-256 digest before the binary is made executable or its version is queried.
 For reproducible deployment, pin both a release tag and the digest of the
-binary for the target OS and architecture:
+binary for the target OS and architecture. This example applies after v0.0.145
+assets are published and their platform digest is available:
 
 ~~~bash
-python manage.py reproq install --tag v0.0.145 --sha256 <platform-binary-sha256>
+uv run python manage.py reproq install --tag v0.0.145 --sha256 <platform-binary-sha256>
 ~~~
 
 The same options work with init and upgrade. An explicit digest disables
@@ -137,7 +157,7 @@ retention remain separate reviewed actions.
 
 ### 6. Run Migrations
 ```bash
-python manage.py migrate
+uv run python manage.py migrate
 ```
 
 The historical `reproq migrate-worker --database <alias>` command now delegates to
@@ -158,7 +178,7 @@ squash require explicit adoption before ordinary migration. Inspect the selected
 database first:
 
 ```bash
-python manage.py reproq adopt-schema --database <alias> --inspect
+uv run python manage.py reproq adopt-schema --database <alias> --inspect
 ```
 
 Adoption accepts only checked-in semantic catalog profiles and exact supported
@@ -173,9 +193,9 @@ record alone never certifies the schema. After reviewing the
 inspection, supply its exact catalog digest and a new audit file:
 
 ```bash
-python manage.py reproq adopt-schema --database <alias> \
+uv run python manage.py reproq adopt-schema --database <alias> \
   --expected-catalog-sha256 <inspected-sha256> --audit-output <new-audit-file.json>
-python manage.py reproq migrate-worker --database <alias>
+uv run python manage.py reproq migrate-worker --database <alias>
 ```
 
 Adoption reconciles the replacement markers covered by the published squash;
@@ -202,7 +222,7 @@ schemas cannot substitute for the validated tables, even on a public-first path.
 
 ### 7. Start the Worker
 ```bash
-python manage.py reproq worker
+uv run python manage.py reproq worker
 ```
 
 ### 8. (Optional) Schedule Periodic Tasks
@@ -210,12 +230,12 @@ You have two options (choose one):
 
 **Option A: Run Beat (one process per database)**
 ```bash
-python manage.py reproq beat
+uv run python manage.py reproq beat
 ```
 
 **Option B: Use Postgres-native scheduling (pg_cron)**
 ```bash
-python manage.py reproq pg-cron --install
+uv run python manage.py reproq pg-cron --install
 ```
 `pg_cron` requires the Postgres extension to be enabled (see `docs/deployment.md`).
 
@@ -223,7 +243,7 @@ python manage.py reproq pg-cron --install
 
 ## 🧰 Management Commands
 
-Run `python manage.py reproq <subcommand>` to manage the worker and day-to-day ops.
+Run `uv run python manage.py reproq <subcommand>` to manage the worker and day-to-day ops.
 Full reference (examples + exit codes): `docs/cli.md`.
 
 - **Bootstrap**: `init` writes `reproq.toml`, installs the worker, and runs migrations. Explicit YAML configuration requires the optional PyYAML reader in the Django environment.
@@ -385,9 +405,9 @@ Each definition belongs to one provider. Long-running Go beat and one-shot Go
 scheduling use the same implementation:
 
 ```bash
-python manage.py reproq beat
+uv run python manage.py reproq beat
 # Or invoke this from an external timer; do not also run the long-running beat:
-python manage.py reproq schedule
+uv run python manage.py reproq schedule
 ```
 
 Go coalesces an overdue definition to one occurrence at its stored nominal
@@ -402,9 +422,9 @@ primitive and the exact stored SDK bytes. It needs an administrator-installed
 functions. Assign definitions to `pg_cron`, then reconcile only their owned jobs:
 
 ```bash
-python manage.py reproq pg-cron --install --dry-run
-python manage.py reproq pg-cron --install
-python manage.py reproq pg-cron --remove
+uv run python manage.py reproq pg-cron --install --dry-run
+uv run python manage.py reproq pg-cron --install
+uv run python manage.py reproq pg-cron --remove
 ```
 
 `--if-supported` skips only an unavailable extension/database capability. It does
@@ -434,7 +454,7 @@ def send_report(account_id):
     ...
 ```
 
-Run `python manage.py reproq sync-recurring` explicitly after imports/deployment.
+Run `uv run python manage.py reproq sync-recurring` explicitly after imports/deployment.
 Named legacy rows can be canonicalized with `reconcile-periodic --name NAME`
 (`--dry-run` previews with transaction rollback). Neither runs on `post_migrate`.
 To run a task immediately, call its standard `enqueue()` method; this does not
@@ -482,6 +502,21 @@ defaults < config file < env vars < CLI flags. Django management commands derive
 an empty DSN from the selected queue database alias and validate explicit
 file/environment targets against it. The standalone Go CLI also accepts `--dsn`.
 
+### Unreleased executor Python selection
+
+This interpreter binding is unreleased. Publish and install matching Go and SDK
+artifacts together before deployment.
+
+Run management commands through `uv run`. The Django worker defaults its
+executor to that selected `sys.executable`, passed explicitly
+through Go's `--python-bin`. An explicit `worker.python_bin` in a config file or
+`--python-bin` command option takes precedence. Generated configuration omits
+this optional value so it remains portable between environments.
+`config --explain`, `check`, and `doctor` show the effective executable and its source.
+The worker must advertise `worker_python_bin` operation version1; the SDK checks
+this before installation or foreground startup. The standalone Go default
+remains `python3`.
+
 ### Multi-Database Queues
 Route specific queues to different Django database aliases.
 
@@ -512,8 +547,8 @@ DATABASE_ROUTERS = ["reproq_django.db_router.ReproqRouter"]
 Run one worker/beat per database:
 
 ```bash
-python manage.py reproq worker --database queues --queues high-priority,bulk-1
-python manage.py reproq beat --database queues
+uv run python manage.py reproq worker --database queues --queues high-priority,bulk-1
+uv run python manage.py reproq beat --database queues
 ```
 
 Use `REPROQ_STATS_DATABASES=["*"]` to aggregate stats across all queue databases.
@@ -634,12 +669,12 @@ reproq triage list --dsn "..." --limit 50
 
 ## 🖥 Management Commands
 
-The `python manage.py reproq` command is your Swiss Army knife.
+The `uv run python manage.py reproq` command is your Swiss Army knife.
 
 | Subcommand | Description |
 | :--- | :--- |
 | `init` | Bootstraps Reproq in the current project. |
-| `worker` | Starts the Go worker. Flags: `--config`, `--concurrency` (default 10), `--queues`, `--allowed-task-modules`, `--logs-dir`, `--payload-mode`, `--metrics-port`, `--metrics-addr`, `--metrics-auth-token`, `--metrics-allow-cidrs`, `--metrics-tls-cert`, `--metrics-tls-key`, `--metrics-tls-client-ca`, `--database`. Auto-configures allow-list when unset (unless config file is used). |
+| `worker` | Starts the Go worker. Flags: `--config`, `--concurrency` (default 10), `--queues`, `--allowed-task-modules`, `--logs-dir`, `--payload-mode`, `--python-bin`, `--metrics-port`, `--metrics-addr`, `--metrics-auth-token`, `--metrics-allow-cidrs`, `--metrics-tls-cert`, `--metrics-tls-key`, `--metrics-tls-client-ca`, `--database`. Auto-configures allow-list when unset (unless config file is used). |
 | `beat` | Starts the scheduler. Flags: `--config`, `--interval` (default 30s), `--once`, `--database`. |
 | `schedule` | Enqueue due periodic tasks once and exit (alias for `beat --once`). |
 | `pg-cron` | Syncs Postgres-native schedules. Flags: `--install` (default), `--remove`, `--prefix`, `--dry-run`, `--database`. |
@@ -762,7 +797,7 @@ the original worker records for inspection.
 Use the unified `reproq check`, `reproq doctor` and `reproq worker` commands.
 The standalone `reproq_check`, `reproq_health` and `reproq_init_executor`
 commands, generated executor stubs and HTTP/CLI stress-test entry points have
-been retired. The canonical executor is `python -m reproq_django.executor`.
+been retired. The canonical executor module is `reproq_django.executor`, launched with the configured Python executable.
 
 Timedeltas and saved model references use explicit typed envelopes. Other JSON
 normalization follows DjangoJSONEncoder: Decimal, UUID and date/time values
@@ -778,7 +813,7 @@ their type or precision is part of the task contract.
 Generate service files to run the worker and beat processes as background daemons.
 
 ```bash
-python manage.py reproq systemd --user myuser --concurrency 20
+uv run python manage.py reproq systemd --user myuser --concurrency 20
 ```
 
 This generates `reproq-worker.service` and `reproq-beat.service`. Copy them to `/etc/systemd/system/` and enable them.
@@ -787,7 +822,7 @@ You can pass metrics flags (for example `--metrics-addr 127.0.0.1:9090`) or use 
 To use cron-style scheduling instead of a persistent beat process, generate a timer:
 
 ```bash
-python manage.py reproq systemd --schedule --schedule-on-calendar "*-*-* *:*:00"
+uv run python manage.py reproq systemd --schedule --schedule-on-calendar "*-*-* *:*:00"
 ```
 
 Set `REPROQ_SCHEDULER_MODE=cron` in your EnvironmentFile and enable the timer to ensure

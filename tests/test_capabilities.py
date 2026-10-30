@@ -32,6 +32,16 @@ def test_incompatible_worker_refused_without_echoing_child_output(monkeypatch, r
 
 
 def test_matching_worker_contract_is_accepted(monkeypatch):
-    value = {**executor_capabilities(), 'worker_version': 'owned'}
+    value = {**executor_capabilities(), 'worker_version': 'owned', 'operations': {'worker_python_bin': 1}}
     monkeypatch.setattr('reproq_django.capabilities._capture_worker_capabilities', lambda binary: json.dumps(value).encode())
     assert require_worker_capabilities('owned-worker') == value
+
+
+@pytest.mark.parametrize('operations', [None, {}, False, {'worker_python_bin': False},
+                                       {'worker_python_bin': True}, {'worker_python_bin': '1'},
+                                       {'worker_python_bin': 0}, {'worker_python_bin': 2}])
+def test_same_protocol_without_exact_python_binding_capability_is_refused(monkeypatch, operations):
+    value = {**executor_capabilities(), 'worker_version': 'same-protocol', 'operations': operations}
+    monkeypatch.setattr('reproq_django.capabilities._capture_worker_capabilities', lambda binary: json.dumps(value).encode())
+    with pytest.raises(ValueError, match='worker_python_bin'):
+        require_worker_capabilities('owned-worker')

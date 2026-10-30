@@ -5,7 +5,7 @@ Reproq is designed for stability in production environments. Follow these guidel
 ## 0. Deployment Options
 
 **Option A (Recommended): Separate worker + scheduler processes**
-- Run `python manage.py reproq worker` and either `python manage.py reproq beat` or `python manage.py reproq pg-cron --install`.
+- Run `uv run python manage.py reproq worker` and either `uv run python manage.py reproq beat` or `uv run python manage.py reproq pg-cron --install`.
 - Use a supervisor (systemd, supervisor, or separate container/services) so they restart automatically.
  - If you route queues to multiple databases, run one worker/beat per database alias (`--database`).
 
@@ -18,6 +18,13 @@ Reproq is designed for stability in production environments. Follow these guidel
 
 Only one `beat` instance should run per database.
 
+For unreleased selected-interpreter binding, deploy matching reviewed Go and SDK
+artifacts together. The [configuration contract](../README.md#unreleased-executor-python-selection)
+defines `--python-bin`, file/CLI precedence and `worker_python_bin:1`. Prestart
+and doctor verify that capability and show the effective executor. Keep one
+outer UV entrypoint for the shared Render environment; no nested UV process is
+required for executor launches.
+
 For a full command reference and examples, see `docs/cli.md`.
 
 ## 1. Systemd Configuration (Recommended)
@@ -25,17 +32,17 @@ For a full command reference and examples, see `docs/cli.md`.
 Reproq provides an automated way to generate systemd service files. This is the preferred method for Linux servers.
 
 ```bash
-python manage.py reproq systemd --concurrency 20
+uv run python manage.py reproq systemd --concurrency 20
 ```
 
 To bake metrics settings into the unit files:
 ```bash
-python manage.py reproq systemd --metrics-addr 127.0.0.1:9090 --metrics-allow-cidrs "127.0.0.1/32"
+uv run python manage.py reproq systemd --metrics-addr 127.0.0.1:9090 --metrics-allow-cidrs "127.0.0.1/32"
 ```
 
 You can also provide an environment file:
 ```bash
-python manage.py reproq systemd --env-file /etc/reproq-worker.env
+uv run python manage.py reproq systemd --env-file /etc/reproq-worker.env
 ```
 
 This will output two service files:
@@ -59,12 +66,12 @@ The Go worker needs access to your database. It respects the following:
 - `REPROQ_DATABASE_URL`: Standard PostgreSQL DSN (e.g., `postgres://user:pass@host:5432/dbname`). Optional if you provide `--dsn` or a config file with `dsn`.
 - `WORKER_ID`: Unique name for the worker node (defaults to hostname).
 - `PYTHONPATH`: Ensure your Django project is importable.
-- `REPROQ_WORKER_BIN`: Optional explicit path to the worker binary. If set, `python manage.py reproq install` writes the binary to this path.
+- `REPROQ_WORKER_BIN`: Optional explicit path to the worker binary. If set, `uv run python manage.py reproq install` writes the binary to this path.
   If unset, the default install target is `./.reproq/bin/reproq`.
 - `METRICS_TLS_CERT`: Optional TLS certificate path for health/metrics.
 - `METRICS_TLS_KEY`: Optional TLS private key path for health/metrics.
 - `METRICS_TLS_CLIENT_CA`: Optional client CA bundle to require mTLS for health/metrics.
-- `ALLOWED_TASK_MODULES`: Optional allow-list for task module prefixes. If unset, `python manage.py reproq worker` auto-configures it from discovered task modules.
+- `ALLOWED_TASK_MODULES`: Optional allow-list for task module prefixes. If unset, `uv run python manage.py reproq worker` auto-configures it from discovered task modules.
 - `REPROQ_LOGS_DIR`: Optional directory to persist worker stdout/stderr logs (updates `task_runs.logs_uri`).
 - `REPROQ_QUEUE_DATABASES`: Map queue names (or globs) to Django database aliases for multi-DB routing.
 - `REPROQ_DEFAULT_DB_ALIAS`: Override the default database alias for queues (defaults to `default`).
@@ -84,11 +91,10 @@ Worker binary resolution order:
 4. `PATH`
 
 ### Schema Compatibility
-Reproq Django uses JSONB columns for worker metadata (`task_runs.worker_ids` and
-`reproq_workers.queues`). If you previously applied the legacy reproq-worker SQL
-migrations that created array columns, apply
-`migrations/000013_convert_worker_arrays_to_jsonb.up.sql` from the reproq-worker
-repo before starting the worker.
+Committed ReproQ Django migrations own queue schema DDL. Follow the
+[migration and guarded adoption procedure](../README.md#6-run-migrations) for
+fresh queues and existing legacy schemas. Adoption verifies catalog structure
+and migration history before any explicit reconciliation.
 
 ## 2a. Metrics & Health Hardening
 If you enable metrics (via `--metrics-port` or `--metrics-addr`), secure the endpoint:
@@ -103,10 +109,11 @@ The number of concurrent tasks a single worker process can handle is configurabl
 - **IO-bound tasks**: Set concurrency higher (e.g., `20-50`).
 
 ```bash
-python manage.py reproq worker --concurrency 50
+uv run python manage.py reproq worker --concurrency 50
 ```
 
-Queue selection uses `--queues` (comma-separated). The legacy `--queue` flag remains for compatibility but is deprecated.
+Queue selection uses `--queues` (comma-separated). The retired `--queue` option
+is rejected; update existing command lines to `--queues`.
 Use `--database <alias>` when a worker should target a non-default queue database.
 
 ## 4. Periodic Tasks (Beat or pg_cron)
@@ -116,21 +123,20 @@ Use `--database <alias>` when a worker should target a non-default queue databas
 ### Option A: Beat
 Start beat as a dedicated process (recommended when pg_cron is unavailable):
 ```bash
-python manage.py reproq beat --interval 30s
+uv run python manage.py reproq beat --interval 30s
 ```
 
-If you cannot run a persistent beat process (low-memory environments), schedule
-beat as a cron job:
+If you cannot run a persistent beat process, choose one external cron entry
+instead. Use the project's working directory and the absolute UV executable:
 
 ```bash
-* * * * * /path/to/venv/bin/python manage.py reproq beat --once
-* * * * * /path/to/venv/bin/python manage.py reproq schedule
+* * * * * cd /path/to/project && /absolute/path/to/uv run python manage.py reproq schedule
 ```
 
 You can also generate a systemd timer to run `reproq schedule` every minute:
 
 ```bash
-python manage.py reproq systemd --schedule --schedule-on-calendar "*-*-* *:*:00"
+uv run python manage.py reproq systemd --schedule --schedule-on-calendar "*-*-* *:*:00"
 ```
 
 Enable the timer, and set `REPROQ_SCHEDULER_MODE=cron` in your EnvironmentFile
@@ -160,10 +166,10 @@ server zone must match each selected definition's CRON_TZ (bare expressions mean
 UTC). Reconcile explicitly after registration:
 
 ```bash
-python manage.py reproq pg-cron --install --dry-run
-python manage.py reproq pg-cron --install
+uv run python manage.py reproq pg-cron --install --dry-run
+uv run python manage.py reproq pg-cron --install
 # Stops exact known owned jobs, never drops extensions/functions:
-python manage.py reproq pg-cron --remove
+uv run python manage.py reproq pg-cron --remove
 ```
 
 The adapter validates all selected jobs before writes and fails on an unknown
@@ -186,7 +192,7 @@ If a worker dies while holding a lease, tasks can remain stuck in `RUNNING`.
 Use the reclaim command to requeue or fail those stale tasks:
 
 ```bash
-python manage.py reproq reclaim --older-than 5m --action requeue
+uv run python manage.py reproq reclaim --older-than 5m --action requeue
 ```
 
 ## 5. Reverse Proxy & Admin
@@ -194,7 +200,7 @@ python manage.py reproq reclaim --older-than 5m --action requeue
 The Reproq Admin uses standard Django Admin templates. Ensure your static files are collected and served correctly:
 
 ```bash
-python manage.py collectstatic
+uv run python manage.py collectstatic
 ```
 
 ## 6. Render Deployment Note
@@ -202,10 +208,10 @@ python manage.py collectstatic
 When deploying on Render, apply committed Django migrations during pre-deploy:
 
 ```bash
-python manage.py migrate --noinput
+uv run python manage.py migrate --noinput
 ```
 
-For a separate queue database, also run `python manage.py reproq migrate-worker
+For a separate queue database, also run `uv run python manage.py reproq migrate-worker
 --database <alias>`. It delegates to the same committed migrations. Existing
 legacy schemas require guarded adoption after producers/workers are quiescent;
 ordinary deployment does not perform an automatic repair.
@@ -223,26 +229,26 @@ post-start enqueue guarded by a deploy identifier (for example,
 ## 7. Troubleshooting Runbook
 
 **Tasks stuck in RUNNING**
-- Reclaim expired leases: `python manage.py reproq reclaim --older-than 5m --action requeue`
+- Reclaim expired leases: `uv run python manage.py reproq reclaim --older-than 5m --action requeue`
 - If tasks should fail instead: `--action fail`
-- Verify workers are heartbeating (`python manage.py reproq status`)
+- Verify workers are heartbeating (`uv run python manage.py reproq status`)
 
 **Allowlist errors or missing tasks**
-- Auto-generate: `python manage.py reproq allowlist --write --config reproq.yaml`
+- Auto-generate: `uv run python manage.py reproq allowlist --write --config reproq.yaml`
 - For local dev only, `ALLOWED_TASK_MODULES=*` disables validation.
 
 **Schema mismatch or missing columns**
-- Run `python manage.py reproq migrate-worker` and re-check `python manage.py reproq doctor`.
+- Run `uv run python manage.py reproq migrate-worker` and re-check `uv run python manage.py reproq doctor`.
 - For legacy catalogs, use `reproq adopt-schema --inspect` and the explicit
   audited adoption procedure. Do not apply retired Go SQL migrations or manual
   DDL repairs.
 
 **DSN or config precedence confusion**
-- Use `python manage.py reproq config --explain` to see the winning values.
+- Use `uv run python manage.py reproq config --explain` to see the winning values.
 - Management commands derive empty DSNs from the selected Django queue database
   and validate explicit file/environment targets. The standalone Go CLI accepts
   `--dsn`; Django management commands use `--database`.
 
 **No logs available**
 - Ensure `REPROQ_LOGS_DIR` (or `--logs-dir`) is set on the worker.
-- Inspect logs via `python manage.py reproq logs --id <result_id>`.
+- Inspect logs via `uv run python manage.py reproq logs --id <result_id>`.

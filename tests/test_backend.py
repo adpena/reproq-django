@@ -194,7 +194,7 @@ class TestReproqManagement(unittest.TestCase):
     @patch("reproq_django.management.commands.reproq.Command.get_dsn")
     @patch("reproq_django.capabilities._capture_worker_capabilities")
     def test_check_command(self, mock_version, mock_get_dsn):
-        mock_version.return_value = b'{"worker_version":"owned","schema_id":"reproq-schema-v2","schema_version":2,"executor_protocol":2}'
+        mock_version.return_value = b'{"worker_version":"owned","schema_id":"reproq-schema-v2","schema_version":2,"executor_protocol":2,"operations":{"worker_python_bin":1}}'
         mock_get_dsn.return_value = "postgres://user:pass@localhost:5432/db"
         from django.core.management import call_command
         from io import StringIO

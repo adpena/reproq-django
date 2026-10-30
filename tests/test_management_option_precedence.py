@@ -1,4 +1,5 @@
 """Native Django command precedence without starting processes or opening a DB."""
+from contextlib import nullcontext
 from io import StringIO
 import builtins
 import json
@@ -19,7 +20,7 @@ from reproq_django.management.commands import reproq
 @pytest.fixture
 def foreground(tmp_path, monkeypatch):
     config = tmp_path / "reproq.toml"
-    config.write_text('[worker]\nconcurrency = 1\nqueues = ["default"]\n[beat]\ninterval = "30s"\n')
+    config.write_text('[worker]\nconcurrency = 1\nqueues = ["default"]\npython_bin = "operator-python"\n[beat]\ninterval = "30s"\n')
     dsn = "postgresql://owned:owned@127.0.0.1:1/never_connect"
     execute = Mock()
     discovery = Mock(return_value="")
@@ -48,7 +49,12 @@ def foreground(tmp_path, monkeypatch):
     environment = {"REPROQ_CONFIG": str(config), "REPROQ_DATABASE_URL": dsn,
                    "ALLOWED_TASK_MODULES": "owned_tasks"}
     with patch.dict(os.environ, environment, clear=True):
-        yield SimpleNamespace(invoke=invoke, config=config, execute=execute, discovery=discovery, dsn=dsn)
+        try:
+            yield SimpleNamespace(invoke=invoke, config=config, execute=execute, discovery=discovery, dsn=dsn)
+        finally:
+            # Test monkeypatches must unwind before patch.dict restores the
+            # caller's environment, or they can restore fixture-only values.
+            monkeypatch.undo()
 
 
 @pytest.mark.parametrize("form", ["kwargs", "cli"])
@@ -60,6 +66,7 @@ def foreground(tmp_path, monkeypatch):
     ("worker", "metrics_auth_token", ""),
     ("worker", "logs_dir", ""),
     ("worker", "metrics_port", 0),
+    ("worker", "python_bin", "/operator environment/bin/python"),
     ("beat", "interval", "5s"),
 ])
 def test_actual_call_options_override_config_independently_of_process_argv(
@@ -104,13 +111,79 @@ def test_explicit_beat_once_is_not_host_argv_dependent(foreground, once):
     assert ("--once" in result.argv) is once
 
 
-def test_no_file_keeps_go_environment_and_defaults_without_shadow_flags(foreground, monkeypatch):
+def test_no_file_keeps_go_environment_and_binds_only_default_executor_python(foreground, monkeypatch):
     monkeypatch.delenv("REPROQ_CONFIG")
     monkeypatch.setenv("QUEUE_NAMES", "special")
     with override_settings(REPROQ_QUEUE_DATABASES={"special": "default", "default": "other"}):
         result = foreground.invoke()
-    assert result.argv == ["owned-reproq", "worker"]
+    assert result.argv == ["owned-reproq", "worker", "--python-bin", sys.executable]
     assert result.environment["QUEUE_NAMES"] == "special"
+
+
+@pytest.mark.parametrize("configured", [None, "", "/explicit environment/bin/python", "python3"])
+def test_executor_python_default_is_selected_runtime_without_changing_explicit_files(
+    foreground, monkeypatch, tmp_path, configured,
+):
+    selected = str(tmp_path / "selected runtime with spaces" / "python")
+    monkeypatch.setattr(sys, "executable", selected)
+    monkeypatch.setenv("PATH", str(tmp_path / "different ambient python"))
+    text = '[worker]\n' if configured is None else '[worker]\npython_bin = ' + json.dumps(configured) + '\n'
+    foreground.config.write_text(text)
+    result = foreground.invoke()
+    expected = ["owned-reproq", "worker", "--config", str(foreground.config)]
+    if not configured:
+        expected += ["--python-bin", selected]
+    assert result.argv == expected
+    assert result.environment["PATH"] == str(tmp_path / "different ambient python")
+    output = StringIO()
+    call_command("reproq", "config", mode="worker", explain=True, stdout=output)
+    line = next(line for line in output.getvalue().splitlines() if line.startswith("worker.python_bin:"))
+    assert (configured or selected) in line
+    assert line.endswith("(config)" if configured else "(default)")
+
+
+@pytest.mark.parametrize("value", ["", "   ", 123])
+def test_explicit_invalid_executor_python_is_rejected_before_go_exec(foreground, value):
+    with pytest.raises(CommandError, match="worker.python_bin"):
+        foreground.invoke(python_bin=value)
+    foreground.execute.assert_not_called()
+
+
+def test_same_protocol_worker_without_selection_feature_is_refused_before_exec(foreground, monkeypatch):
+    from reproq_django.capabilities import executor_capabilities, require_worker_capabilities
+
+    response = {**executor_capabilities(), "worker_version": "same-protocol"}
+    monkeypatch.setattr("reproq_django.capabilities._capture_worker_capabilities", lambda binary: json.dumps(response).encode())
+    monkeypatch.setattr(reproq, "require_worker_capabilities", require_worker_capabilities)
+    with pytest.raises(CommandError, match="worker_python_bin"):
+        foreground.invoke()
+    foreground.execute.assert_not_called()
+
+
+def test_prestart_refuses_a_missing_explicit_config_before_database_access(foreground, monkeypatch, tmp_path):
+    monkeypatch.setenv("REPROQ_CONFIG", str(tmp_path / "missing.toml"))
+    monkeypatch.setattr(reproq, "require_worker_capabilities", lambda binary: {"worker_version": "owned"})
+    with pytest.raises(CommandError, match="Config file not found"):
+        call_command("reproq", "check", skip_checks=True, stdout=StringIO(), stderr=StringIO())
+
+
+@pytest.mark.parametrize("subcommand", ["check", "doctor"])
+@pytest.mark.parametrize("configured", [None, "/operator runtime/python"])
+def test_prestart_and_doctor_report_the_same_effective_executor_python(
+    foreground, monkeypatch, subcommand, configured,
+):
+    foreground.config.write_text('[worker]\n' + ("" if configured is None else 'python_bin = ' + json.dumps(configured) + '\n'))
+    connection = SimpleNamespace(
+        alias="default", ensure_connection=lambda: None, cursor=lambda: nullcontext(None),
+        introspection=SimpleNamespace(table_names=lambda *args: ["task_runs", "periodic_tasks", "reproq_workers", "rate_limits", "workflow_runs", "reproq_queue_controls"]),
+    )
+    monkeypatch.setattr(reproq, "connections", {"default": connection})
+    monkeypatch.setattr(reproq, "require_schema_contract", lambda connection: None)
+    monkeypatch.setattr(reproq.Command, "_periodic_registration_problems", lambda self, alias: [])
+    monkeypatch.setattr(reproq, "require_worker_capabilities", lambda binary: {"worker_version": "owned"})
+    output = StringIO()
+    call_command("reproq", subcommand, skip_checks=True, stdout=output, stderr=StringIO())
+    assert f"Executor Python: {configured or sys.executable} ({'config' if configured else 'default'})" in output.getvalue()
 
 
 @pytest.mark.parametrize("queue_value", ["", " , "])
@@ -268,7 +341,8 @@ def test_default_init_worker_derives_selected_django_dsn(foreground, tmp_path, m
     foreground.discovery.return_value = str(generated)
     with override_settings(REPROQ_QUEUE_DATABASES={"default": "default", "high": "default"}):
         result = foreground.invoke()
-    assert result.argv == ["owned-reproq", "worker", "--config", str(generated)]
+    assert "python_bin" not in data["worker"]
+    assert result.argv == ["owned-reproq", "worker", "--config", str(generated), "--python-bin", sys.executable]
     assert result.environment["REPROQ_DATABASE_URL"] == foreground.dsn
     output = StringIO()
     call_command("reproq", "config", mode="all", explain=True, stdout=output)

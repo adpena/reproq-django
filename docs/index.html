@@ -80,10 +80,11 @@
             <section id="quickstart" class="mb-16 prose prose-slate max-w-none">
                 <h2 class="text-3xl font-bold mb-6">Quickstart</h2>
                 <p>Install the package and bootstrap the environment in a few steps.</p>
+                <p><strong>Unreleased current branch:</strong> Public worker v0.0.144 does not satisfy this SDK branch's new capability. Matching v0.0.145 assets are not published yet. Use a reviewed local SDK/worker pair and <code>REPROQ_WORKER_BIN</code>; hosted download examples apply after matching publication. See the <a href="https://github.com/adpena/reproq-django/blob/main/README.md#unreleased-executor-python-selection">configuration and compatibility contract</a>.</p>
                 
                 <h4 class="font-bold mt-4">1. Install</h4>
-                <pre>uv pip install reproq-django
-# or: pip install reproq-django</pre>
+                <pre>uv add --editable /path/to/reviewed/reproq-django</pre>
+                <p>After matching v0.1.531 publication on GitHub, use <code>uv add "reproq-django @ git+https://github.com/adpena/reproq-django.git@v0.1.531"</code>. This future example uses GitHub distribution.</p>
 
                 <h4 class="font-bold mt-4">2. Configure</h4>
                 <p>Add to <code>INSTALLED_APPS</code> and set your <code>TASKS</code> backend.</p>
@@ -107,28 +108,28 @@ def send_welcome_email(user_id):
                 <p class="mt-3 text-sm text-slate-600">In async (ASGI) contexts, use <code>aenqueue()</code> to avoid blocking.</p>
 
                 <h4 class="font-bold mt-4">4. Bootstrap</h4>
-                <p>Run the init command to download the Go worker and write a config file.</p>
-                <pre>python manage.py reproq init</pre>
+                <p>Select the reviewed local worker and skip the unpublished hosted download.</p>
+                <pre>export REPROQ_WORKER_BIN=/absolute/path/to/reviewed/reproq
+uv run python manage.py reproq init --skip-install</pre>
 
                 <h4 class="font-bold mt-4">5. Migrate</h4>
-                <p>Run worker schema setup before Django migrations.</p>
-                <pre>python manage.py reproq migrate-worker
-python manage.py migrate --noinput</pre>
+                <p>Init uses committed Django migrations. If migrations were deferred, apply them explicitly:</p>
+                <pre>uv run python manage.py migrate --noinput</pre>
 
                 <h4 class="font-bold mt-4">6. Run the Worker</h4>
-                <pre>python manage.py reproq worker</pre>
+                <pre>uv run python manage.py reproq worker</pre>
 
                 <h4 class="font-bold mt-4">7. (Optional) Schedule Periodic Tasks</h4>
                 <p>Choose one scheduler: beat or pg_cron.</p>
-                <pre>python manage.py reproq beat
-python manage.py reproq beat --once
-python manage.py reproq schedule
-python manage.py reproq pg-cron --install</pre>
+                <pre>uv run python manage.py reproq beat
+uv run python manage.py reproq beat --once
+uv run python manage.py reproq schedule
+uv run python manage.py reproq pg-cron --install</pre>
             </section>
 
             <section id="management" class="mb-16 prose prose-slate max-w-none">
                 <h2 class="text-3xl font-bold mb-6">Management Commands</h2>
-                <p>Run <code>python manage.py reproq &lt;subcommand&gt;</code> for worker lifecycle and ops.</p>
+                <p>Run <code>uv run python manage.py reproq &lt;subcommand&gt;</code> for worker lifecycle and ops.</p>
                 <ul>
                     <li><strong>init</strong>: Write <code>reproq.toml</code>, install the worker, and run migrations. Explicit YAML requires PyYAML.</li>
                     <li><strong>worker</strong>: Start the Go worker process.</li>
@@ -140,7 +141,7 @@ python manage.py reproq pg-cron --install</pre>
                     <li><strong>migrate-worker</strong>: Apply committed Django migrations on the selected queue database.</li>
                     <li><strong>doctor</strong>: Validate DSN, schema, worker binary, and allowlist health.</li>
                     <li><strong>config --explain</strong>: Print the effective config with precedence.</li>
-                    <li><strong>upgrade</strong>: Fetch the latest worker release and run <code>migrate-worker</code>.</li>
+                    <li><strong>upgrade</strong>: Install this SDK's tested compatible worker tag (or an explicit <code>--tag</code>), then apply committed Django migrations.</li>
                     <li><strong>allowlist --write</strong>: Persist discovered task modules into the config file.</li>
                     <li><strong>reclaim</strong>: Requeue or fail tasks with expired leases.</li>
                     <li><strong>status / logs / cancel</strong>: Quick ops helpers for triage.</li>
@@ -281,13 +282,13 @@ register_periodic(
                 <h2 class="text-3xl font-bold mb-6 text-slate-900 tracking-tight">Production Deployment</h2>
                 <p class="text-slate-600 mb-6 text-lg">Reproq is production-ready and includes automated tools for Linux systemd configuration.</p>
                 <p class="text-slate-600 mb-4 text-sm">For deploy-time tasks (like deploy notifications), enqueue them after the worker starts and guard with a deploy ID (for example, RENDER_DEPLOY_ID) so old workers do not claim them.</p>
-                <p class="text-slate-600 mb-4 text-sm">If a worker crashes mid-task, reclaim stale leases with <code>python manage.py reproq reclaim --older-than 5m --action requeue</code>.</p>
+                <p class="text-slate-600 mb-4 text-sm">If a worker crashes mid-task, reclaim stale leases with <code>uv run python manage.py reproq reclaim --older-than 5m --action requeue</code>.</p>
                 <p class="text-slate-600 mb-4 text-sm">If you expose metrics, bind to localhost or a private interface and set <code>METRICS_AUTH_TOKEN</code>. Use <code>METRICS_ALLOW_CIDRS</code> to restrict access by IP/CIDR.</p>
                 
                 <div class="bg-slate-50 border border-slate-200 rounded-2xl p-8">
                     <h4 class="font-bold text-slate-800 mb-2">Automated systemd setup</h4>
                     <p class="text-slate-600 mb-4">Generate optimized service files for your specific project environment:</p>
-                    <pre class="bg-slate-900 text-slate-50 p-4 rounded-xl mb-6">python manage.py reproq systemd --concurrency 25</pre>
+                    <pre class="bg-slate-900 text-slate-50 p-4 rounded-xl mb-6">uv run python manage.py reproq systemd --concurrency 25</pre>
                     
                     <p class="text-sm text-slate-500">This command creates service files that handle:</p>
                     <ul class="grid grid-cols-1 md:grid-cols-2 gap-2 text-sm text-slate-600 mt-2">
