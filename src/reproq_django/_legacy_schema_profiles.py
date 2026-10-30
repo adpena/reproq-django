@@ -283,3 +283,30 @@ _DJANGO_BASELINE_CATALOG = {**_RESTORED_CATALOG,
 }
 
 DJANGO_BASELINE_PROFILE = {"name": "django-baseline-v1", "migration_sha256": "149f8e626c1df240ba2d862653e8dc8a7fa1660e7a5d2d8f9c5d5debe8b4d559", "catalog": _DJANGO_BASELINE_CATALOG}
+
+# A migration-created Django core also existed alongside the Go baseline's
+# auxiliary tables and indexes. Preserve the exact Django column, constraint,
+# trigger and sequence evidence; add only the already recorded Go objects.
+# This is one complete observed profile, not permission to ignore extra indexes
+# or mix arbitrary parts of otherwise supported catalogs.
+_DJANGO_GO_AUX_CATALOG = {}
+for _family, _django_rows in _DJANGO_BASELINE_CATALOG.items():
+    _rows = list(_django_rows)
+    _django_index_keys = {tuple(row[:2]) for row in _django_rows}
+    _rows.extend(
+        row for row in _GO_CATALOG[_family]
+        if row[0] in {"workflow_runs", "rate_limits"}
+        or (_family == "indexes" and tuple(row[:2]) not in _django_index_keys)
+    )
+    _DJANGO_GO_AUX_CATALOG[_family] = sorted(_rows, key=lambda row: tuple(row[:2]))
+
+LEGACY_SCHEMA_PROFILES.append({
+    "name": "legacy-django-core-go-aux-v1",
+    "provenance": {
+        "purpose": "Exact validation evidence; never a DDL source",
+        "django_baseline_sha256": DJANGO_BASELINE_PROFILE["migration_sha256"],
+        "worker_baseline_sha256": "1510d2cc98b1cfc37ffc4a5a8b8bfc9e637698e8e4cbedc39c5e9b17de52ca5d",
+        "observed_catalog_sha256": "b23eeea7f18b9bf81b7152922c3c9acf7be25e52b604d3085e5bf4a61a5c941a",
+    },
+    "catalog": _DJANGO_GO_AUX_CATALOG,
+})

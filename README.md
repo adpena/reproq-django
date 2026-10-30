@@ -162,7 +162,12 @@ python manage.py reproq adopt-schema --database <alias> --inspect
 Adoption accepts only checked-in semantic catalog profiles and exact supported
 historical ledger sets. It checks column types/nullability/defaults, constraints
 and validation state, indexes, triggers/functions and sequence ownership. Unknown
-or partial schemas fail without changing migration history. After reviewing the
+or partial schemas fail without changing migration history. The exact historical
+Django baseline plus the Go baseline's auxiliary tables and eight additional
+indexes is also supported. If the baseline and its replacement records are
+already coherent, use ordinary forward Django migration without re-adopting
+history. The physical catalog and forward data checks still apply; a migration
+record alone never certifies the schema. After reviewing the
 inspection, supply its exact catalog digest and a new audit file:
 
 ```bash
