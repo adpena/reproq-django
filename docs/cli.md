@@ -200,13 +200,25 @@ uv run python manage.py reproq logs --id 1234 --show-path
 Aliased IDs (`queues:123`) are supported when multiple databases are configured.
 
 ## cancel
-Request cancellation for a running task. The worker enforces cancellation on the next heartbeat.
+Request cancellation for a task run. `READY` / `WAITING` work becomes `CANCELLED`
+atomically. Cancellation of `RUNNING` work is cooperative and observed on a worker
+heartbeat. Once cancellation is recorded, a later success acknowledgment is
+rejected.
+Repeated or terminal cancellation leaves history unchanged.
 
 ```bash
 uv run python manage.py reproq cancel --id 1234
 ```
 
-Aliased IDs (`queues:123`) are supported when multiple databases are configured.
+An exact ID selects the cancellation root; affected dependencies and workflow
+callbacks can also be finalized. A completed command acknowledges the request,
+not that running work has stopped. Inspect the current native task state to
+confirm the outcome. If the command fails or its acknowledgment is lost, inspect
+that state before another operator request; do not retry automatically. See the
+worker's [current cancellation contract](https://github.com/adpena/reproq-worker#cancel).
+
+Aliased IDs (`queues:123`) and `--database` select a Django database alias, not a
+`TASKS` backend alias. If both are supplied, their database aliases must agree.
 
 ## allowlist
 Compute the module allowlist from installed task modules.
