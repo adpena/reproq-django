@@ -9,13 +9,12 @@ import urllib.request
 from django.conf import settings
 from django.db import connections
 from django.db.models import Count
+from django.db.models.functions import Now
 from django.http import HttpResponse, JsonResponse, StreamingHttpResponse
-from django.utils import timezone
-from datetime import timedelta
 from django.views.decorators.http import require_GET
 
 from .models import TaskRun, Worker, PeriodicTask, QueueControl
-from .recurring import periodic_definition_status
+from .recurring import periodic_definition_status, scheduler_status
 from .db import default_db_alias, queue_db_aliases
 from .tui_auth import (
     get_tui_internal_endpoints,
@@ -84,17 +83,16 @@ def _scheduler_status(aliases, periodic):
             except Exception as error:
                 native = None
                 error_type = type(error).__name__
-        rows = [row for row in periodic if row['database'] == alias and row['enabled']]
+        rows = [row for row in periodic if row['database'] == alias]
         databases.append({'alias': alias, 'native_extension_installed': native,
                           'capability_probe_error_type': error_type,
-                          'registered_definitions': {provider: sum(
-                              row['scheduler_provider'] == provider and row['definition_status'] == 'registered'
-                              for row in rows) for provider in ('go', 'pg_cron')},
-                          'execution_observed': False})
+                          **scheduler_status(rows)})
     return {'configured_mode': getattr(settings, 'REPROQ_SCHEDULER_MODE', '')
             or os.environ.get('REPROQ_SCHEDULER_MODE', '') or 'unspecified',
             'low_memory': tui_low_memory_enabled(), 'observed_state': 'unknown',
             'databases': databases,
+            'warnings': [f"{database['alias']}: {warning}" for database in databases
+                         for warning in database['warnings']],
             'note': 'Configuration, registration and extension installation do not prove scheduler execution.'}
 
 
@@ -169,11 +167,11 @@ def reproq_stats_api(request):
         queue_stats = TaskRun.objects.using(alias).values("queue_name", "status").annotate(count=Count("result_id"))
         worker_stats = Worker.objects.using(alias).all().values(
             "worker_id", "hostname", "concurrency", "queues", "last_seen_at", "version"
-        )
+        ).annotate(observed_at=Now())
         periodic_stats = PeriodicTask.objects.using(alias).all().values(
             "name", "cron_expr", "enabled", "next_run_at", "queue_name", "last_run_at",
             "scheduler_provider", "spec_version"
-        )
+        ).annotate(observed_at=Now())
         periodic_stats = list(periodic_stats)
         for row in periodic_stats:
             row["definition_status"] = periodic_definition_status(row["spec_version"], row["scheduler_provider"])
@@ -230,10 +228,6 @@ def reproq_stats_api(request):
             }
         )
 
-    alive_cutoff = timezone.now() - timedelta(minutes=2)
-    alive = sum(1 for worker in workers if worker.get("last_seen_at") and worker["last_seen_at"] > alive_cutoff)
-    dead = len(workers) - alive
-
     top_failing_list = [
         {"task_path": key, "count": value}
         for key, value in sorted(top_failing_counts.items(), key=lambda item: item[1], reverse=True)[:5]
@@ -245,7 +239,7 @@ def reproq_stats_api(request):
         "workers": workers,
         "periodic": periodic,
         "queue_controls": queue_controls,
-        "worker_health": {"alive": alive, "dead": dead},
+        "worker_health": Worker.heartbeat_health(workers),
         "scheduler": _scheduler_status(aliases, periodic),
         "top_failing": top_failing_list,
         "databases": databases,

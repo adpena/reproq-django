@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
+import os
 from typing import Any
 
 from django.db import connections, transaction
@@ -37,6 +38,58 @@ def periodic_definition_status(spec_version, scheduler_provider):
     if spec_version == SPEC_VERSION and scheduler_provider in {'go', 'pg_cron'}:
         return 'registered'
     return 'reconciliation_required'
+
+
+def scheduler_status(rows):
+    """Describe stored definitions and supervisor configuration, never execution.
+
+    ``observed_at`` must come from the selected database's read statement. A
+    past-due Go cursor is useful evidence, but does not identify its cause.
+    Native pg_cron does not use that cursor as its occurrence clock.
+    """
+    mode = os.environ.get("REPROQ_SCHEDULER_MODE", "").strip().lower() or "beat"
+    command_disabled = ("REPROQ_BEAT_CMD" in os.environ and
+                        os.environ["REPROQ_BEAT_CMD"].strip().lower() in
+                        {"", "0", "false", "off", "disabled", "none"})
+    managed_beat = mode == "beat" and not command_disabled
+    enabled = [row for row in rows if row["enabled"]]
+    registered = {provider: [row for row in enabled
+                            if row["scheduler_provider"] == provider and
+                            periodic_definition_status(row["spec_version"], provider) == "registered"]
+                  for provider in ("go", "pg_cron")}
+    overdue = [row for row in registered["go"]
+               if row.get("observed_at") is not None and row["next_run_at"] is not None
+               and row["next_run_at"] < row["observed_at"]]
+    oldest = min((row["next_run_at"] for row in overdue), default=None)
+    delay = max(((row["observed_at"] - row["next_run_at"]).total_seconds()
+                 for row in overdue), default=None)
+    warnings = []
+    if registered["go"] and not managed_beat:
+        warnings.append(
+            f"{len(registered['go'])} enabled Go definition(s) have managed beat disabled "
+            "by configuration; external scheduling is unverified."
+        )
+    if overdue:
+        warnings.append(
+            f"{len(overdue)} enabled Go definition(s) have past-due cursors "
+            f"(oldest overdue by {int(delay)}s); scheduler execution is unknown."
+        )
+    return {
+        "supervisor_mode": mode,
+        "managed_beat_configured": managed_beat,
+        "managed_beat_disabled_reason": ("scheduler_mode" if mode != "beat" else
+                                         "explicit_beat_command" if command_disabled else None),
+        "enabled_definitions": len(enabled),
+        "disabled_definitions": len(rows) - len(enabled),
+        "registered_definitions": {provider: len(items) for provider, items in registered.items()},
+        "reconciliation_required": sum(periodic_definition_status(
+            row["spec_version"], row["scheduler_provider"]) != "registered" for row in enabled),
+        "overdue_go_definitions": len(overdue),
+        "oldest_overdue_go_next_run_at": oldest,
+        "oldest_overdue_go_seconds": delay,
+        "execution_observed": False,
+        "warnings": warnings,
+    }
 
 
 def recurring(

@@ -404,6 +404,21 @@ admin permits pausing/resuming definitions; canonical spec fields are read-only.
 Each definition belongs to one provider. Long-running Go beat and one-shot Go
 scheduling use the same implementation:
 
+The read-only stats API and `reproq status` distinguish disabled definitions,
+registration problems, past-due Go cursors measured against the database clock,
+and managed beat being disabled by configuration. Worker records are counted
+separately as alive or stale against each selected database's statement clock;
+their heartbeats do not prove scheduler execution. Admin status uses that same
+classification. The API's existing `worker_health.dead` key counts stale records.
+Explicit admin and CLI worker pruning also compare against the selected database
+clock, preserving their existing retention thresholds and selections. Neither
+status nor doctor runs pruning or changes task history.
+`reproq doctor --strict` also fails on these scheduling warnings. A past-due
+cursor does not identify the cause, and native pg_cron uses its own occurrence
+clock. Prestart `reproq check` does not wait for due cursors to advance: beat
+must first be allowed to start. `LOW_MEMORY_MODE=1` does not disable the current
+supervisor's explicitly configured beat process.
+
 ```bash
 uv run python manage.py reproq beat
 # Or invoke this from an external timer; do not also run the long-running beat:

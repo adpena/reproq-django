@@ -4,6 +4,7 @@ from django.utils.safestring import mark_safe
 from django.utils.html import format_html, format_html_join
 from django.utils import timezone
 from django.db.models import Count, Q
+from django.db.models.functions import Now
 from django.db import router
 from datetime import timedelta
 from .models import TaskRun, Worker, PeriodicTask, RateLimit, WorkflowRun, QueueControl
@@ -38,24 +39,28 @@ class WorkerAdmin(admin.ModelAdmin):
     list_display = ("worker_id", "hostname_display", "concurrency", "queues", "status_icon", "last_seen_at")
     readonly_fields = ("worker_id", "hostname", "concurrency", "queues", "started_at", "last_seen_at", "version")
     actions = ["delete_stale_workers"]
+
+    def get_queryset(self, request):
+        return super().get_queryset(request).annotate(observed_at=Now())
     
     def hostname_display(self, obj):
         return f"{obj.hostname} (v{obj.version or '?'})"
     hostname_display.short_description = "Worker Info"
 
     def status_icon(self, obj):
-        is_alive = obj.last_seen_at > timezone.now() - timedelta(minutes=2)
+        if not hasattr(obj, "observed_at"):
+            return format_html('<b style="color: {};">● {}</b>', "#616161", "UNKNOWN")
+        is_alive = Worker.heartbeat_is_alive(obj.last_seen_at, obj.observed_at)
         color = "#2e7d32" if is_alive else "#d32f2f"
-        label = "ALIVE" if is_alive else "DEAD"
+        label = "ALIVE" if is_alive else "STALE"
         return format_html('<b style="color: {};">● {}</b>', color, label)
     status_icon.short_description = "Status"
 
     @admin.action(description="Delete stale workers (last seen > 10m)")
     def delete_stale_workers(self, request, queryset):
-        cutoff = timezone.now() - timedelta(minutes=10)
+        cutoff = Now() - timedelta(minutes=10)
         stale = queryset.filter(last_seen_at__lt=cutoff)
-        count = stale.count()
-        stale.delete()
+        count, _ = stale.delete()
         self.message_user(request, f"Deleted {count} stale worker(s).", messages.SUCCESS)
 
     def has_add_permission(self, request): return False

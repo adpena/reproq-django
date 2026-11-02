@@ -1,3 +1,5 @@
+from datetime import timedelta
+
 from django.db import models
 from django.db.models.functions import Now
 
@@ -128,6 +130,17 @@ class Worker(models.Model):
         db_table = "reproq_workers"
         verbose_name = "Worker"
         verbose_name_plural = "Workers"
+
+    @staticmethod
+    def heartbeat_is_alive(last_seen_at, observed_at):
+        """Classify a heartbeat against its selected database statement clock."""
+        return last_seen_at > observed_at - timedelta(minutes=2)
+
+    @classmethod
+    def heartbeat_health(cls, rows):
+        states = [cls.heartbeat_is_alive(row["last_seen_at"], row["observed_at"]) for row in rows]
+        alive = sum(states)
+        return {"alive": alive, "dead": len(states) - alive}
 
     def __str__(self):
         return f"{self.worker_id} ({self.hostname})"

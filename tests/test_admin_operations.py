@@ -1,5 +1,7 @@
 """Real admin/queryset preflight with an inert worker boundary and memory DB."""
 from types import SimpleNamespace
+from datetime import timedelta
+from io import StringIO
 from unittest.mock import Mock
 from uuid import uuid4
 
@@ -9,10 +11,11 @@ from django.core.management import call_command
 from django.db.models.query import QuerySet
 from django.tasks.base import TASK_MAX_PRIORITY
 from django.test import override_settings
+from django.utils import timezone
 import pytest
 
 from reproq_django import operations
-from reproq_django.models import TaskRun
+from reproq_django.models import TaskRun, Worker
 from reproq_django.specs import build_spec, spec_fields
 
 
@@ -42,6 +45,48 @@ def failed(**changes):
     fields = {**spec_fields(build_spec(task_path='owned.admin.task')),
               'task_path': 'owned.admin.task', 'dedupe_active': False, 'status': 'FAILED'}
     return TaskRun.objects.create(**(fields | changes))
+
+
+@pytest.mark.parametrize("entrypoint", ["admin", "cli", "cli-dry-run"])
+@pytest.mark.parametrize("skew_minutes", [-10, 10])
+def test_worker_pruning_uses_selected_database_clock_and_preserves_task_history(
+    operator, monkeypatch, entrypoint, skew_minutes,
+):
+    from reproq_django.admin import WorkerAdmin
+
+    _, request, _, _, invoke = operator
+    Worker.objects.all().delete()
+    now = timezone.now()
+    historical_failure = failed()
+    try:
+        for name, age in [("fresh", 1), ("stale", 15), ("unselected", 20)]:
+            Worker.objects.create(worker_id=name)
+            Worker.objects.filter(worker_id=name).update(last_seen_at=now - timedelta(minutes=age))
+        monkeypatch.setattr("django.utils.timezone.now", lambda: now + timedelta(minutes=skew_minutes))
+        if entrypoint == "admin":
+            admin = WorkerAdmin(Worker, AdminSite())
+            notices = []
+            admin.message_user = lambda request, message, level=None: notices.append(str(message))
+            admin.delete_stale_workers(request, Worker.objects.using("default").filter(worker_id__in=["fresh", "stale"]))
+            assert notices == ["Deleted 1 stale worker(s)."]
+            expected = {"fresh", "unselected"}
+        else:
+            output = StringIO()
+            args = ["reproq", "prune-workers", "--database", "default", "--older-than", "10m"]
+            if entrypoint == "cli-dry-run":
+                args.append("--dry-run")
+            call_command(*args, stdout=output)
+            if entrypoint == "cli-dry-run":
+                assert "Dry run: 2 worker(s) would be deleted." in output.getvalue()
+                expected = {"fresh", "stale", "unselected"}
+            else:
+                assert "Deleted 2 stale worker(s)." in output.getvalue()
+                expected = {"fresh"}
+        assert set(Worker.objects.values_list("worker_id", flat=True)) == expected
+        assert TaskRun.objects.get(pk=historical_failure.pk).status == "FAILED"
+        invoke.assert_not_called()
+    finally:
+        Worker.objects.all().delete()
 
 
 def reject_model_hydration_and_count(monkeypatch):

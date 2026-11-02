@@ -16,10 +16,11 @@ from datetime import timedelta
 from django.core.management.base import BaseCommand, CommandError
 from django.conf import settings
 from django.db import connections
+from django.db.models.functions import Now
 from django.utils import timezone
 from ...models import PeriodicTask, TaskRun, QueueControl
 from ...db import default_db_alias, parse_result_id, queue_db_aliases
-from ...recurring import periodic_definition_status, sync_recurring_tasks
+from ...recurring import periodic_definition_status, scheduler_status, sync_recurring_tasks
 from ...schema_contract import SchemaContractError, require_schema_contract
 from ...schema_adoption import SchemaAdoptionError, adopt_legacy_schema, inspect_legacy_schema
 from ...schema_inspection import SchemaInspectionError
@@ -634,6 +635,10 @@ class Command(BaseCommand):
                 else:
                     for problem in self._periodic_registration_problems(db_alias):
                         fail(problem)
+                    observation = self._scheduler_observation(db_alias)
+                    self.stdout.write("Scheduler execution: unknown (worker heartbeats are separate).")
+                    for warning in observation["warnings"]:
+                        warn(warning)
 
         allowlist = effective.get("worker", {}).get("allowed_task_modules", [])
         if not allowlist:
@@ -1008,16 +1013,16 @@ WantedBy=timers.target
 
     def run_prune_workers(self, options):
         from reproq_django.models import Worker
-        cutoff = timezone.now() - self._parse_duration(options["older_than"])
+        cutoff = Now() - self._parse_duration(options["older_than"])
         aliases = self._resolve_db_aliases(options)
         for alias in aliases:
             queryset = Worker.objects.using(alias).filter(last_seen_at__lt=cutoff)
-            count = queryset.count()
             prefix = f"[{alias}] " if len(aliases) > 1 else ""
             if options["dry_run"]:
+                count = queryset.count()
                 self.stdout.write(self.style.WARNING(f"{prefix}Dry run: {count} worker(s) would be deleted."))
                 continue
-            queryset.delete()
+            count, _ = queryset.delete()
             self.stdout.write(self.style.SUCCESS(f"{prefix}Deleted {count} stale worker(s)."))
 
     def run_prune(self, options):
@@ -1349,6 +1354,12 @@ WantedBy=timers.target
                             "no historical payload or version will be rewritten automatically.")
         return problems
 
+    def _scheduler_observation(self, alias):
+        rows = list(PeriodicTask.objects.using(alias).values(
+            "enabled", "next_run_at", "scheduler_provider", "spec_version",
+        ).annotate(observed_at=Now()))
+        return scheduler_status(rows)
+
     def _pg_cron_available(self, cursor):
         from ...pg_cron import is_available
 
@@ -1446,10 +1457,25 @@ WantedBy=timers.target
                 color = self.style.SUCCESS if s["status"] == "SUCCESSFUL" else (self.style.ERROR if s["status"] == "FAILED" else self.style.WARNING)
                 self.stdout.write(f"  {s['status']:<12}: {color(str(s['count']))}")
 
-            workers = list(Worker.objects.using(alias).all())
-            self.stdout.write(f"Active Workers: {len(workers)}")
+            workers = list(Worker.objects.using(alias).values(
+                "worker_id", "hostname", "queues", "concurrency", "last_seen_at",
+            ).annotate(observed_at=Now()))
+            health = Worker.heartbeat_health(workers)
+            self.stdout.write(f"Worker records: {len(workers)} (alive: {health['alive']}, stale: {health['dead']})")
             for w in workers:
-                self.stdout.write(f"  - {w.worker_id} ({w.hostname}) | Queues: {w.queues} | Concurrency: {w.concurrency}")
+                state = "alive" if Worker.heartbeat_is_alive(w["last_seen_at"], w["observed_at"]) else "stale"
+                self.stdout.write(f"  - {w['worker_id']} ({w['hostname']}) | {state} | Queues: {w['queues']} | Concurrency: {w['concurrency']}")
+
+            observation = self._scheduler_observation(alias)
+            self.stdout.write("Scheduler execution: unknown (worker heartbeats are separate).")
+            self.stdout.write(
+                f"Periodic definitions: {observation['enabled_definitions']} enabled, "
+                f"{observation['disabled_definitions']} disabled, "
+                f"{observation['reconciliation_required']} require reconciliation; "
+                f"{observation['overdue_go_definitions']} Go cursor(s) past due."
+            )
+            for warning in observation["warnings"]:
+                self.stdout.write(self.style.WARNING(warning))
 
         if len(aliases) > 1:
             self.stdout.write("\nAggregate Totals:")

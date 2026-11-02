@@ -169,7 +169,7 @@ def test_prestart_refuses_a_missing_explicit_config_before_database_access(foreg
 
 @pytest.mark.parametrize("subcommand", ["check", "doctor"])
 @pytest.mark.parametrize("configured", [None, "/operator runtime/python"])
-def test_prestart_and_doctor_report_the_same_effective_executor_python(
+def test_prestart_and_doctor_report_executor_without_blocking_on_due_schedules(
     foreground, monkeypatch, subcommand, configured,
 ):
     foreground.config.write_text('[worker]\n' + ("" if configured is None else 'python_bin = ' + json.dumps(configured) + '\n'))
@@ -180,10 +180,20 @@ def test_prestart_and_doctor_report_the_same_effective_executor_python(
     monkeypatch.setattr(reproq, "connections", {"default": connection})
     monkeypatch.setattr(reproq, "require_schema_contract", lambda connection: None)
     monkeypatch.setattr(reproq.Command, "_periodic_registration_problems", lambda self, alias: [])
+    observations = []
+
+    def observe(self, alias):
+        observations.append(alias)
+        return {"warnings": ["An enabled Go definition has a past-due cursor; execution is unknown."]}
+
+    monkeypatch.setattr(reproq.Command, "_scheduler_observation", observe)
     monkeypatch.setattr(reproq, "require_worker_capabilities", lambda binary: {"worker_version": "owned"})
     output = StringIO()
     call_command("reproq", subcommand, skip_checks=True, stdout=output, stderr=StringIO())
     assert f"Executor Python: {configured or sys.executable} ({'config' if configured else 'default'})" in output.getvalue()
+    assert observations == (["default"] if subcommand == "doctor" else [])
+    if subcommand == "doctor":
+        assert "past-due cursor" in output.getvalue()
 
 
 @pytest.mark.parametrize("queue_value", ["", " , "])

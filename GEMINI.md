@@ -29,6 +29,15 @@ reset. Each definition is assigned to Go or pg_cron. Go beat and one-shot schedu
 share one scheduler; native jobs call the migration-owned occurrence primitive.
 Native cron.timezone must match the definition's zone. Native execution-minute
 identity/catch-up differs from Go nominal-tick coalescing; see README.
+Read-only API/status and doctor expose managed-beat configuration conflicts and
+past-due Go cursors using the selected database's statement clock. Disabled
+definitions are not inferred to be intentionally held. Worker heartbeats and
+registration do not establish scheduler execution. Do not block prestart on
+overdue cursors, or restart would prevent beat from advancing them.
+Worker heartbeat health in API, CLI and admin shares one Worker classifier and
+uses each selected database's statement clock, never the application host clock.
+Explicit worker pruning uses that database clock too, with its existing age
+thresholds, aliases and admin selection; observation commands never prune.
 
 ## Runtime Contract
 The worker and SDK must agree on schema2/executor protocol2 before claims.
