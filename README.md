@@ -55,23 +55,30 @@ Package builds require `setuptools>=84.1.0` and `wheel>=0.46.2`.
 
 ## ⚡ Quickstart
 
-**Unreleased current branch:** The public worker release is v0.0.144. This SDK
-branch requires the matching v0.0.145 candidate and its `worker_python_bin:1`
-capability; those assets are not published yet. Current-branch development uses
-a reviewed local SDK/worker pair through `REPROQ_WORKER_BIN`. Worker v0.0.144
-does not satisfy this new contract. The download examples below apply only
-after matching Go and SDK artifacts are published.
+**SDK 0.1.531 requires Reproq Worker v0.0.145** with `worker_python_bin:1` and
+the migration-owned schema-v2/executor-protocol2 contract. Worker v0.0.144 does
+not satisfy this contract. Upgrade the SDK, worker and queue migrations as a
+coordinated change; the historical-schema adoption and draining requirements
+below still apply. Package publication does not qualify a production cutover.
 
 ### 1. Install
-For current-branch development, add the reviewed local SDK to the Django project:
+Install SDK 0.1.531 from PyPI:
+
+```bash
+uv add 'reproq-django==0.1.531'
+```
+
+Alternatively, use the version-pinned GitHub release tag:
+
+```bash
+uv add "reproq-django @ git+https://github.com/adpena/reproq-django.git@v0.1.531"
+```
+
+For reviewed paired development, add the local SDK instead:
 
 ```bash
 uv add --editable /path/to/reviewed/reproq-django
 ```
-
-After the matching v0.1.531 tag is published on GitHub, install that version with
-`uv add "reproq-django @ git+https://github.com/adpena/reproq-django.git@v0.1.531"`.
-This is a future GitHub distribution example; it does not require a PyPI package.
 
 ### 2. Configure Settings
 Add `reproq_django` to your `INSTALLED_APPS` and configure the `TASKS` backend:
@@ -109,8 +116,8 @@ def send_welcome_email(user_id: int) -> str:
 ### 4. Bootstrap (Recommended)
 Bootstrap writes a config file, installs the worker binary, and applies committed
 Django migrations. Queue schema changes have one owner: this package's migrations.
-For current-branch development, select the reviewed local worker and skip the
-unavailable hosted download:
+For reviewed paired development, select the local v0.0.145 worker and skip
+the hosted download:
 
 ```bash
 export REPROQ_WORKER_BIN=/absolute/path/to/reviewed/reproq
@@ -121,21 +128,20 @@ project-wide invocation; `--skip-worker-migrate` skips the separate ReproQ-only
 invocation. Both invocations use the same committed Django migrations. Use both
 flags when migration execution must be deferred.
 
-### 5. Download the Worker (After Matching Publication)
-Once matching Go and SDK releases are published, the SDK installer selects its
-tested compatible tag. The v0.0.145 download is a future example until then:
+### 5. Download the Compatible Worker
+SDK 0.1.531 selects the compatible v0.0.145 tag by default:
 
 ```bash
 uv run python manage.py reproq install
 ```
 The installer detects the OS/architecture and fetches that tag's pre-built
-binary from GitHub. Current-branch local development uses the selector above.
+binary from GitHub. Reviewed paired development can use the local selector above.
 
 Downloads must match the publisher's checksum sidecar or GitHub release-asset
 SHA-256 digest before the binary is made executable or its version is queried.
 For reproducible deployment, pin both a release tag and the digest of the
-binary for the target OS and architecture. This example applies after v0.0.145
-assets are published and their platform digest is available:
+binary for the target OS and architecture. For v0.0.145, use the reviewed digest
+of that release's binary for the selected platform:
 
 ~~~bash
 uv run python manage.py reproq install --tag v0.0.145 --sha256 <platform-binary-sha256>
@@ -517,10 +523,11 @@ defaults < config file < env vars < CLI flags. Django management commands derive
 an empty DSN from the selected queue database alias and validate explicit
 file/environment targets against it. The standalone Go CLI also accepts `--dsn`.
 
-### Unreleased executor Python selection
+### Executor Python selection (SDK 0.1.531 / Worker v0.0.145)
 
-This interpreter binding is unreleased. Publish and install matching Go and SDK
-artifacts together before deployment.
+This interpreter binding requires the matching Go/SDK pair and queue migrations
+described in Quickstart. Its local checks do not establish application workload,
+native-platform capacity or production deployment qualification.
 
 Run management commands through `uv run`. The Django worker defaults its
 executor to that selected `sys.executable`, passed explicitly

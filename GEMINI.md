@@ -40,8 +40,10 @@ Explicit worker pruning uses that database clock too, with its existing age
 thresholds, aliases and admin selection; observation commands never prune.
 
 ## Runtime Contract
-The worker and SDK must agree on schema2/executor protocol2 before claims.
-Unreleased executor binding requires worker_python_bin operation version1. Django's default
+SDK 0.1.531 requires worker v0.0.145 and the migration-owned schema2/executor
+protocol2 contract before claims. Apply the coordinated queue migrations, with
+historical-schema adoption and draining where required; worker v0.0.144 is incompatible.
+This executor binding requires worker_python_bin operation version1. Django's default
 executor is its UV-selected sys.executable, passed with --python-bin; explicit
 file/CLI choices take precedence. Portable init templates omit python_bin.
 Every claim has a fresh UUID lease token; RUNNING owner/token/unexpired DB lease
@@ -83,6 +85,9 @@ multiple databases is rejected rather than guessing the result's database.
   explicit audit receipt. Workers require the migration-owned schema contract;
   they must not create, repair, or migrate queue tables themselves.
 - Preserve published tags, releases, and assets for reproducibility. Retire obsolete current code and active artifacts instead; never move a released tag or replace published assets.
+- Publish worker v0.0.145 with `latest=false` before SDK 0.1.531, preserving
+  SDK 0.1.530's compatible `latest` installer target. Package publication does
+  not qualify an application's migration, resource or production cutover.
 
 ## Testing
 Always run tests via `uv` to ensure the locked environment is used:
