@@ -120,11 +120,13 @@ def send_welcome_email(user_id):
                 <pre>uv run python manage.py reproq worker</pre>
 
                 <h4 class="font-bold mt-4">7. (Optional) Schedule Periodic Tasks</h4>
-                <p>Choose one scheduler: beat or pg_cron.</p>
-                <pre>uv run python manage.py reproq beat
-uv run python manage.py reproq beat --once
-uv run python manage.py reproq schedule
-uv run python manage.py reproq pg-cron --install</pre>
+                <p>Assign each <a href="#periodic">periodic task</a> to Go or <code>pg_cron</code>. Both can serve the same queue database when they own different definitions.</p>
+                <p>For Go-owned definitions, run one persistent beat per database.</p>
+                <pre>uv run python manage.py reproq beat</pre>
+                <p>For one-shot Go scheduling, call this command from an external timer instead.</p>
+                <pre>uv run python manage.py reproq schedule</pre>
+                <p>For <code>pg_cron</code>-owned definitions, configure the extension first, then reconcile its jobs.</p>
+                <pre>uv run python manage.py reproq pg-cron --install</pre>
             </section>
 
             <section id="management" class="mb-16 prose prose-slate max-w-none">

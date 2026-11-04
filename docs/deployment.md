@@ -118,7 +118,14 @@ Use `--database <alias>` when a worker should target a non-default queue databas
 
 ## 4. Periodic Tasks (Beat or pg_cron)
 
-**CRITICAL**: Only run **one scheduler** per database. Running multiple schedulers will result in tasks being scheduled multiple times.
+Assign each periodic definition to either Go or `pg_cron`. A queue database
+can use both providers for different definitions. For Go-owned definitions,
+use one supervised beat process or one external timer per database.
+
+Replaying the same `(periodic_name, scheduled_for)` occurrence reuses its
+existing run. Before changing a definition's provider, reconcile the old jobs
+and the new provider's schedule. Go and `pg_cron` derive occurrence times
+differently. See the [periodic task contract](../README.md#-periodic-tasks).
 
 ### Option A: Beat
 Start beat as a dedicated process (recommended when pg_cron is unavailable):
