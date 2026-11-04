@@ -150,6 +150,6 @@ uv run python manage.py reproq logs --id 1234 --show-path
 
 Use `--max-bytes` to cap the read size. If `logs_uri` is empty, no logs were captured or persisted.
 
-Unreleased selected-runtime binding and portable configuration are defined in
-the [canonical configuration contract](../README.md#unreleased-executor-python-selection).
+See the [executor configuration contract](../README.md#executor-python-selection-sdk-01531--worker-v00145)
+for interpreter selection and portable configuration.
 The executor protocol and payload schema remain unchanged.

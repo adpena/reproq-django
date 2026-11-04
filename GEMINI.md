@@ -85,9 +85,10 @@ multiple databases is rejected rather than guessing the result's database.
   explicit audit receipt. Workers require the migration-owned schema contract;
   they must not create, repair, or migrate queue tables themselves.
 - Preserve published tags, releases, and assets for reproducibility. Retire obsolete current code and active artifacts instead; never move a released tag or replace published assets.
-- Publish worker v0.0.145 with `latest=false` before SDK 0.1.531, preserving
-  SDK 0.1.530's compatible `latest` installer target. Package publication does
-  not qualify an application's migration, resource or production cutover.
+- Publish matching worker assets before distributing a new SDK. Preserve
+  compatibility for SDK 0.1.530, whose installer follows GitHub's `latest`
+  pointer. Worker v0.0.145 was published with `latest=false` for this reason.
+  Application migration and production cutover require separate qualification.
 
 ## Testing
 Always run tests via `uv` to ensure the locked environment is used:

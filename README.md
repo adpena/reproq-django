@@ -38,24 +38,21 @@ the SDK derives queue connections from the selected Django alias and preserves
 that business environment for task execution. Queue names must route to the
 selected alias through `REPROQ_QUEUE_DATABASES`.
 
-Python 3.15 is validated by this project's checks against published Django 6.1.2
-and `psycopg[binary]` 3.3.6. As of October 28, 2026, Django's upstream
-[6.1.3 release notes](https://github.com/django/django/blob/5e109ba2895f0db9679c03a1b23f0b40c0b9310f/docs/releases/6.1.3.txt)
-plan official Python 3.15 support for that release. The current lock uses released
-packages, with Django 6.1.2 on every supported interpreter and no prerelease or
-source pins. The package also permits the
-[patched Django 6.0 branch](https://www.djangoproject.com/weblog/2026/oct/06/security-releases/)
-on Python 3.12–3.14.
-The explicit 6.1.0 and 6.1.1 exclusions prevent an installed affected higher
-minor release from satisfying the older-Python security floor. They cover
-known published versions, rather than promising security for future releases.
+This repository's lock uses Django 6.1.2 and `psycopg[binary]` 3.3.6, the
+pairing exercised by the locked Python 3.15 checks. Django first added official
+Python 3.15 support in [6.1.3](https://docs.djangoproject.com/en/6.1/releases/6.1.3/).
+The table gives the package's accepted version ranges. See Django's
+[November 3 security advisory](https://www.djangoproject.com/weblog/2026/nov/03/security-releases/)
+for the fixes in Django 6.1.3 and 6.0.10 before selecting deployment versions.
 Package builds require `setuptools>=84.1.0` and `wheel>=0.46.2`.
 
 ---
 
 ## ⚡ Quickstart
 
-**SDK 0.1.531 requires Reproq Worker v0.0.145** with `worker_python_bin:1` and
+[SDK 0.1.531](https://pypi.org/project/reproq-django/0.1.531/) requires
+[Reproq Worker v0.0.145](https://github.com/adpena/reproq-worker/releases/tag/v0.0.145)
+with `worker_python_bin:1` and
 the migration-owned schema-v2/executor-protocol2 contract. Worker v0.0.144 does
 not satisfy this contract. Upgrade the SDK, worker and queue migrations as a
 coordinated change; the historical-schema adoption and draining requirements
@@ -115,7 +112,12 @@ def send_welcome_email(user_id: int) -> str:
 
 ### 4. Bootstrap (Recommended)
 Bootstrap writes a config file, installs the worker binary, and applies committed
-Django migrations. Queue schema changes have one owner: this package's migrations.
+Django migrations. This package's migrations own the queue schema.
+
+```bash
+uv run python manage.py reproq init
+```
+
 For reviewed paired development, select the local v0.0.145 worker and skip
 the hosted download:
 

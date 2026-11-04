@@ -18,14 +18,14 @@ Reproq is designed for stability in production environments. Follow these guidel
 
 Only one `beat` instance should run per database.
 
-For unreleased selected-interpreter binding, deploy matching reviewed Go and SDK
-artifacts together. The [configuration contract](../README.md#unreleased-executor-python-selection)
-defines `--python-bin`, file/CLI precedence and `worker_python_bin:1`. Prestart
-and doctor verify that capability and show the effective executor. Keep one
-outer UV entrypoint for the shared Render environment; no nested UV process is
-required for executor launches.
+Deploy the [compatible SDK and worker](../README.md#-quickstart) together.
+The [executor configuration contract](../README.md#executor-python-selection-sdk-01531--worker-v00145)
+defines `--python-bin`, file and CLI precedence, and the `worker_python_bin:1`
+capability. Prestart and doctor verify that capability. Start the shared Render
+environment through one `uv run` invocation so executor launches can reuse its
+selected Python.
 
-For a full command reference and examples, see `docs/cli.md`.
+See the [CLI reference](cli.md) for full command examples.
 
 ## 1. Systemd Configuration (Recommended)
 

@@ -10,33 +10,25 @@ This page documents `uv run python manage.py reproq <subcommand>`. Use `--help` 
 ## init
 Bootstrap a project by writing a config file, installing the worker, and running migrations.
 TOML is the default and uses Python's standard library reader. Explicit
-`--format yaml` requires PyYAML in the Django environment. Unreleased portable
-templates omit `worker.python_bin`; they do not capture the current machine path.
-On this unreleased branch, use a reviewed local SDK/worker pair and set
-`REPROQ_WORKER_BIN`. Public v0.0.144 does not satisfy the new capability and the
-matching v0.0.145 assets are not published yet. Skip installation during init:
+`--format yaml` requires PyYAML in the Django environment. Generated config
+files omit the optional `worker.python_bin` so they remain portable.
 
 ```bash
-uv run python manage.py reproq init --format toml --skip-install
+uv run python manage.py reproq init --format toml
 ```
 
-Example output:
-```
-🚀 Bootstrapping Reproq...
-✅ Config written to reproq.toml
-✅ Reproq schema applied.
-✨ Reproq is ready!
-```
+If you already have a reviewed local worker, set `REPROQ_WORKER_BIN` and use
+`--skip-install`. See the [bootstrap guide](../README.md#4-bootstrap-recommended).
 
 Useful flags: `--skip-install`, `--skip-migrate`, `--skip-worker-migrate`, `--force`, `--tag`.
 
 ## worker
 Start the Go worker process.
 
-Unreleased: `--python-bin` explicitly selects the executor; otherwise the SDK
-passes the interpreter selected by `uv run` unless `worker.python_bin` is set
-in the file. See the [canonical configuration contract](../README.md#unreleased-executor-python-selection)
-for precedence, the required versioned worker capability, and release status.
+Use `--python-bin` to select the executor explicitly. Otherwise, the SDK uses
+`worker.python_bin` from the config file when set, or the interpreter selected
+by `uv run`. See the [executor configuration contract](../README.md#executor-python-selection-sdk-01531--worker-v00145)
+for the required worker capability and precedence.
 
 ```bash
 uv run python manage.py reproq worker --concurrency 20 --queues default,high
@@ -93,21 +85,17 @@ Use `--database` to target a specific database alias.
 ## install
 Download (or build) the worker binary.
 
-The following hosted installation example applies after matching Go/SDK
-publication. Current-branch v0.0.145 downloads are unavailable; use the reviewed
-local worker selector described in the [quickstart](../README.md).
-
 ```bash
 uv run python manage.py reproq install
 ```
 
 Install, init, and upgrade default to the worker release tested with this SDK.
-They do not follow a mutable latest-release pointer. An explicit `--tag` selects
-another release; digest verification and provider compatibility checks still
-apply before atomic installation. Publish the paired worker assets before
-distributing a new SDK whose default tag requires them.
+SDK 0.1.531 selects v0.0.145. An explicit `--tag` selects a different release
+subject to the SDK's compatibility checks. See the [pinned installation
+instructions](../README.md#5-download-the-compatible-worker) for platform
+digests and source-build behavior.
 
-Useful flags: `--tag`, `--build`, `--source`.
+Useful flags: `--tag`, `--sha256`, `--build`, `--source`.
 
 ## migrate-worker
 Apply the committed Django migrations to the selected queue database. This
@@ -134,7 +122,7 @@ uv run python manage.py reproq doctor --strict
 Example output:
 ```
 🔎 Reproq Doctor
-✅ Worker binary: 0.0.129
+✅ Worker binary: 0.0.145
 ✅ Database connection ok.
 ✅ Reproq schema present.
 ✨ Doctor completed with no blocking issues.
@@ -159,8 +147,8 @@ Precedence: defaults < config file < env vars < CLI flags
 
 ## upgrade
 Install the worker release tested with this SDK (or build from source) and
-optionally apply the committed queue migrations. Use `--tag latest` explicitly
-to select the current GitHub release instead; compatibility checks still apply.
+optionally apply the committed queue migrations. Pin a compatible tag and
+platform digest for reproducible deployment.
 
 ```bash
 uv run python manage.py reproq upgrade
