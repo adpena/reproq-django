@@ -59,16 +59,16 @@ coordinated change; the historical-schema adoption and draining requirements
 below still apply. Package publication does not qualify a production cutover.
 
 ### 1. Install
-Install SDK 0.1.531 from PyPI:
+Install SDK 0.1.532 from PyPI:
 
 ```bash
-uv add 'reproq-django==0.1.531'
+uv add 'reproq-django==0.1.532'
 ```
 
 Alternatively, use the version-pinned GitHub release tag:
 
 ```bash
-uv add "reproq-django @ git+https://github.com/adpena/reproq-django.git@v0.1.531"
+uv add "reproq-django @ git+https://github.com/adpena/reproq-django.git@v0.1.532"
 ```
 
 For reviewed paired development, add the local SDK instead:

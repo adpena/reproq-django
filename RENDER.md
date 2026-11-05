@@ -53,7 +53,8 @@ explicitly disabled beat command still omits beat. A custom web command should
 use the selected interpreter's absolute path to run the Gunicorn module, rather
 than nesting UV or depending on a login shell's PATH.
 
-`REPROQ_WORKER_ENABLED` explicitly controls the supervisor's worker process.
+SDK 0.1.532 and later provide `REPROQ_WORKER_ENABLED` to explicitly control
+the supervisor's worker process.
 Unset means enabled; accepted values are `true`/`1` and `false`/`0`, with
 case-insensitive words. Empty or unknown values fail before prestart or process
 launch without logging the supplied value. When enabled, an empty or unset
