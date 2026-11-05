@@ -53,6 +53,28 @@ explicitly disabled beat command still omits beat. A custom web command should
 use the selected interpreter's absolute path to run the Gunicorn module, rather
 than nesting UV or depending on a login shell's PATH.
 
+`REPROQ_WORKER_ENABLED` explicitly controls the supervisor's worker process.
+Unset means enabled; accepted values are `true`/`1` and `false`/`0`, with
+case-insensitive words. Empty or unknown values fail before prestart or process
+launch without logging the supplied value. When enabled, an empty or unset
+`REPROQ_WORKER_CMD` still selects the default worker command. When disabled,
+even a custom worker command is not run. Scheduler selection is independent.
+
+For a web-only process, set `REPROQ_WORKER_ENABLED=false` and
+`REPROQ_SCHEDULER_MODE=off`. After successful prestart, the supervisor executes
+the web command directly, without worker or beat restart supervisors. These
+settings do not stop actors in other services or disable database-native jobs.
+The default prestart remains `manage.py reproq check`, including worker binary,
+configuration and queue-schema checks; there is no `check --skip-binary` option.
+A deployment that deliberately has no worker binary can supply its existing
+custom-prestart contract, for example
+`REPROQ_PRESTART_CMD='exec /absolute/venv/bin/python manage.py check'`.
+That Django system check does not establish queue schema or worker readiness;
+perform any additional application/release checks in the same reviewed command.
+`REPROQ_PROCESS_ROLE` labels logs and does not enable or disable actors.
+Supervisor status messages omit prestart-command and scheduler-mode values.
+Custom programs retain their own stdout and stderr behavior.
+
 The Django worker passes the selected interpreter to Go's executor through
 `--python-bin`. See the [executor configuration contract](README.md#executor-python-selection-sdk-01531--worker-v00145)
 for explicit overrides and the capability that prestart and doctor verify.

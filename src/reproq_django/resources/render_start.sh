@@ -27,6 +27,14 @@ prestart_cmd="${REPROQ_PRESTART_CMD:-}"
 prestart_interval="${REPROQ_PRESTART_INTERVAL_SECONDS:-5}"
 prestart_max_wait="${REPROQ_PRESTART_MAX_WAIT_SECONDS:-120}"
 worker_cmd="${REPROQ_WORKER_CMD:-}"
+case "${REPROQ_WORKER_ENABLED-true}" in
+  "1"|[Tt][Rr][Uu][Ee]) worker_enabled=1 ;;
+  "0"|[Ff][Aa][Ll][Ss][Ee]) worker_enabled=0 ;;
+  *)
+    log "REPROQ_WORKER_ENABLED must be true, false, 1, or 0."
+    exit 1
+    ;;
+esac
 default_beat=0
 scheduler_mode_normalized="$(printf '%s' "${REPROQ_SCHEDULER_MODE:-}" | tr '[:upper:]' '[:lower:]' | xargs)"
 if [[ -v REPROQ_BEAT_CMD ]]; then
@@ -44,7 +52,7 @@ fi
 web_cmd="${REPROQ_WEB_CMD:-}"
 
 if [[ -n "$scheduler_mode_normalized" && "$scheduler_mode_normalized" != "beat" ]]; then
-  log "REPROQ_SCHEDULER_MODE=${REPROQ_SCHEDULER_MODE}; disabling reproq-beat."
+  log "non-beat scheduler mode; disabling reproq-beat."
   beat_cmd=""
   default_beat=0
 fi
@@ -54,7 +62,7 @@ if [[ -z "$web_cmd" ]]; then
   exit 1
 fi
 
-if [[ -z "$prestart_cmd" || -z "$worker_cmd" || "$default_beat" -eq 1 ]]; then
+if [[ -z "$prestart_cmd" || ( "$worker_enabled" -eq 1 && -z "$worker_cmd" ) || "$default_beat" -eq 1 ]]; then
   # One selected runtime serves all default commands. Login shells may reset
   # PATH, so retain its absolute interpreter rather than another UV parent.
   if [[ -n "${VIRTUAL_ENV:-}" ]]; then
@@ -71,7 +79,7 @@ if [[ -z "$prestart_cmd" || -z "$worker_cmd" || "$default_beat" -eq 1 ]]; then
   if [[ -z "$prestart_cmd" ]]; then
     prestart_cmd="exec ${python_command} manage.py reproq check"
   fi
-  if [[ -z "$worker_cmd" ]]; then
+  if [[ "$worker_enabled" -eq 1 && -z "$worker_cmd" ]]; then
     worker_cmd="exec ${python_command} manage.py reproq worker --concurrency ${REPROQ_CONCURRENCY:-3} --metrics-addr ${METRICS_ADDR:-127.0.0.1:9090}"
   fi
   if [[ "$default_beat" -eq 1 ]]; then
@@ -80,7 +88,7 @@ if [[ -z "$prestart_cmd" || -z "$worker_cmd" || "$default_beat" -eq 1 ]]; then
 fi
 
 if [[ -n "$prestart_cmd" ]]; then
-  log "prestart: ${prestart_cmd}"
+  log "prestart checking"
   prestart_started=$(date +%s)
   while true; do
     if bash -lc "$prestart_cmd"; then
@@ -132,11 +140,11 @@ run_with_restart() {
   done
 }
 
-if [[ -n "$worker_cmd" ]]; then
+if [[ "$worker_enabled" -eq 1 ]]; then
   run_with_restart "reproq-worker" "REPROQ_PROCESS_ROLE=worker ${worker_cmd}" &
   child_pids+=("$!")
 else
-  log "reproq-worker disabled (empty REPROQ_WORKER_CMD)"
+  log "reproq-worker disabled (REPROQ_WORKER_ENABLED=false)"
 fi
 
 if [[ -n "$beat_cmd" ]]; then
@@ -147,6 +155,11 @@ else
 fi
 
 log "web starting"
+if ((${#child_pids[@]} == 0)); then
+  # No actor needs a restart supervisor; retain the web command's exit/signal
+  # behavior without an otherwise idle parent process.
+  exec bash -lc "REPROQ_PROCESS_ROLE=web ${web_cmd}"
+fi
 bash -lc "REPROQ_PROCESS_ROLE=web ${web_cmd}" &
 web_pid=$!
 child_pids+=("$web_pid")

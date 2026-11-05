@@ -66,7 +66,7 @@ if role == "worker" and os.environ.get("REPROQ_TEST_RESTART"):
     if sum(row["event"] == "start" and row["role"] == "worker" for row in starts) == 1:
         raise SystemExit(23)
 if role == "web":
-    required = {"worker"}
+    required = {"worker"} if os.environ["REPROQ_TEST_EXPECT_WORKER"] == "1" else set()
     if os.environ["REPROQ_TEST_EXPECT_BEAT"]:
         required.add(os.environ["REPROQ_TEST_EXPECT_BEAT"])
     deadline = time.monotonic() + 3
@@ -74,7 +74,8 @@ if role == "web":
         rows = [json.loads(line) for line in event_file.read_text().splitlines()]
         started = [row for row in rows if row["event"] == "start"]
         worker_count = sum(row["role"] == "worker" for row in started)
-        if required <= {row["role"] for row in started} and worker_count >= (2 if os.environ.get("REPROQ_TEST_RESTART") else 1):
+        expected_workers = (2 if os.environ.get("REPROQ_TEST_RESTART") else 1) if "worker" in required else 0
+        if required <= {row["role"] for row in started} and worker_count >= expected_workers:
             if os.environ.get("REPROQ_TEST_ENDING") == "term":
                 Path(os.environ["REPROQ_TEST_READY"]).touch()
                 break
@@ -89,7 +90,8 @@ while True:
 
 def run_supervisor(tmp_path, *, mode, low_memory, expected_beat, beat_command=None,
                    active_environment=True, overrides=None, uv_fails=False,
-                   ending="exit", restart=False, web_exit=0, expected_error=None):
+                   ending="exit", restart=False, web_exit=0, expected_error=None,
+                   expected_worker=True):
     """Use the real resource; replace only external application commands."""
     probe = tmp_path / "probe.py"
     probe.write_text(PROBE)
@@ -123,6 +125,7 @@ def run_supervisor(tmp_path, *, mode, low_memory, expected_beat, beat_command=No
         "PATH": str(binary_directory) + os.pathsep + environment.get("PATH", ""),
         "BASH_ENV": str(bash_environment), "LOW_MEMORY_MODE": low_memory,
         "REPROQ_TEST_EVENTS": str(events), "REPROQ_TEST_EXPECT_BEAT": expected_beat,
+        "REPROQ_TEST_EXPECT_WORKER": "1" if expected_worker else "0",
         "REPROQ_WEB_CMD": f"exec {command} web",
         "REPROQ_PRESTART_MAX_WAIT_SECONDS": "1", "REPROQ_RESTART_DELAY_SECONDS": "1",
         "PYTHONDONTWRITEBYTECODE": "1",
@@ -167,22 +170,27 @@ def run_supervisor(tmp_path, *, mode, low_memory, expected_beat, beat_command=No
     if expected_error is not None:
         assert process.returncode == 1 and expected_error in stdout, (stdout, stderr)
         assert not events.exists()
-        return {"uv_calls": calls}
+        return {"uv_calls": calls, "stdout": stdout, "stderr": stderr}
     assert process.returncode == (143 if ending == "term" else web_exit), (stdout, stderr)
     all_rows = [json.loads(line) for line in events.read_text().splitlines()]
     rows = [row for row in all_rows if row["event"] == "start"]
     roles = {row["role"] for row in rows}
-    assert roles == {"prestart", "worker", "web", *([expected_beat] if expected_beat else [])}, (rows, stdout, stderr)
+    assert roles == {"prestart", "web", *(["worker"] if expected_worker else []),
+                     *([expected_beat] if expected_beat else [])}, (rows, stdout, stderr)
     assert sum(row["role"] == expected_beat for row in rows) == bool(expected_beat)
-    assert sum(row["role"] == "worker" for row in rows) == (2 if restart else 1)
-    assert next(row for row in rows if row["role"] == "worker")["process_role"] == "worker"
+    assert sum(row["role"] == "worker" for row in rows) == ((2 if restart else 1) if expected_worker else 0)
+    if expected_worker:
+        assert next(row for row in rows if row["role"] == "worker")["process_role"] == "worker"
+    else:
+        assert "reproq-worker starting" not in stdout
     if expected_beat:
         assert next(row for row in rows if row["role"] == expected_beat)["process_role"] == "beat"
     else:
         assert "reproq-beat starting" not in stdout
     assert "LOW_MEMORY_MODE enabled; disabling reproq-beat" not in stdout
     return {"rows": rows, "events": all_rows, "uv_calls": calls,
-            "selected_python": str(selected_python), "stdout": stdout}
+            "selected_python": str(selected_python), "stdout": stdout, "stderr": stderr,
+            "supervisor_pid": process.pid}
 
 
 @pytest.mark.parametrize("mode", ["beat", "off", "pg_cron"])
@@ -217,6 +225,22 @@ def test_existing_scheduler_mode_normalization_is_preserved(tmp_path):
     run_supervisor(tmp_path, mode="  BeAt  ", low_memory="1", expected_beat="beat")
 
 
+def test_nonbeat_scheduler_value_is_not_logged(tmp_path):
+    canary = "private-scheduler-canary"
+    result = run_supervisor(tmp_path, mode=canary, low_memory="1", expected_beat="")
+    assert canary not in result["stdout"] + result["stderr"]
+    assert "non-beat scheduler mode; disabling reproq-beat." in result["stdout"]
+
+
+def test_prestart_command_is_not_logged(tmp_path):
+    canary = "private-prestart-canary"
+    result = run_supervisor(tmp_path, mode="off", low_memory="1", expected_beat="",
+        overrides={"REPROQ_PRESTART_CMD": f"exec @probe prestart # {canary}"})
+    assert canary not in result["stdout"] + result["stderr"]
+    assert "prestart checking" in result["stdout"]
+    assert next(row for row in result["rows"] if row["role"] == "prestart")["arguments"] == ["prestart"]
+
+
 @pytest.mark.parametrize("active_environment", [True, False])
 @pytest.mark.parametrize("mode", ["beat", "off", "pg_cron"])
 def test_default_commands_reuse_one_selected_interpreter_with_spaces(tmp_path, active_environment, mode):
@@ -237,6 +261,49 @@ def test_explicit_empty_worker_and_prestart_retain_defaults(tmp_path):
     result = run_supervisor(tmp_path, mode="beat", low_memory="1", expected_beat="beat",
         active_environment=False, overrides={"REPROQ_WORKER_CMD": "", "REPROQ_PRESTART_CMD": ""})
     assert result["uv_calls"] == ["resolve"]
+
+
+@pytest.mark.parametrize("enabled", ["1", "true", "TRUE", "TrUe"])
+def test_explicit_enabled_worker_preserves_default_command(tmp_path, enabled):
+    run_supervisor(tmp_path, mode="off", low_memory="1", expected_beat="",
+        overrides={"REPROQ_WORKER_ENABLED": enabled, "REPROQ_WORKER_CMD": ""})
+
+
+@pytest.mark.parametrize("enabled", ["0", "false", "FALSE", "FaLsE"])
+@pytest.mark.parametrize("ending", ["exit", "term"])
+def test_disabled_worker_and_beat_exec_web_only(tmp_path, enabled, ending):
+    result = run_supervisor(tmp_path, mode="off", low_memory="1", expected_beat="",
+        expected_worker=False, ending=ending, web_exit=42, active_environment=False,
+        overrides={"REPROQ_WORKER_ENABLED": enabled, "REPROQ_WORKER_CMD": "exec @probe worker"})
+    assert result["uv_calls"] == ["resolve"]  # Default prestart still runs check.
+    web = next(row for row in result["rows"] if row["role"] == "web")
+    assert web["pid"] == result["supervisor_pid"]
+    assert web["process_role"] == "web"
+    assert "REPROQ_WORKER_ENABLED=false" in result["stdout"]
+
+
+def test_disabled_worker_keeps_independent_beat_selection(tmp_path):
+    run_supervisor(tmp_path, mode="beat", low_memory="1", expected_beat="beat",
+        expected_worker=False, overrides={"REPROQ_WORKER_ENABLED": "false"})
+
+
+def test_web_only_custom_prestart_does_not_resolve_worker_runtime(tmp_path):
+    result = run_supervisor(tmp_path, mode="off", low_memory="1", expected_beat="",
+        expected_worker=False, active_environment="broken", uv_fails=True,
+        overrides={"REPROQ_WORKER_ENABLED": "false", "REPROQ_PRESTART_CMD": "exec @probe prestart"})
+    assert not result["uv_calls"]
+
+
+@pytest.mark.parametrize("invalid", ["", "2", "disabled", "none", " false ", "true\n", "false\n", "private-invalid-value"])
+def test_invalid_worker_activation_fails_before_prestart_without_echo(tmp_path, invalid):
+    result = run_supervisor(tmp_path, mode="off", low_memory="1", expected_beat="",
+        active_environment=False, uv_fails=True,
+        overrides={"REPROQ_WORKER_ENABLED": invalid},
+        expected_error="REPROQ_WORKER_ENABLED must be true, false, 1, or 0.")
+    assert not result["uv_calls"]
+    if invalid:
+        assert f"REPROQ_WORKER_ENABLED={invalid}" not in result["stdout"] + result["stderr"]
+    assert "private-invalid-value" not in result["stdout"] + result["stderr"]
 
 
 @pytest.mark.parametrize("beat_command", ["custom", ""])

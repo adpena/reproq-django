@@ -18,6 +18,12 @@ Reproq is designed for stability in production environments. Follow these guidel
 
 Only one `beat` instance should run per database.
 
+The packaged supervisor can also run web-only: set
+`REPROQ_WORKER_ENABLED=false` and `REPROQ_SCHEDULER_MODE=off`. Worker activation
+defaults to enabled; empty worker commands retain the default command rather
+than disabling it. See [Render deployment](../RENDER.md#process-layout) for the
+accepted boolean values, unchanged prestart checks and custom-prestart contract.
+
 Deploy the [compatible SDK and worker](../README.md#-quickstart) together.
 The [executor configuration contract](../README.md#executor-python-selection-sdk-01531--worker-v00145)
 defines `--python-bin`, file and CLI precedence, and the `worker_python_bin:1`
