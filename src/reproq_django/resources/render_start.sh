@@ -24,6 +24,10 @@ trap shutdown SIGTERM SIGINT
 
 restart_delay="${REPROQ_RESTART_DELAY_SECONDS:-5}"
 prestart_cmd="${REPROQ_PRESTART_CMD:-}"
+custom_prestart=0
+if [[ -n "$prestart_cmd" ]]; then
+  custom_prestart=1
+fi
 prestart_interval="${REPROQ_PRESTART_INTERVAL_SECONDS:-5}"
 prestart_max_wait="${REPROQ_PRESTART_MAX_WAIT_SECONDS:-120}"
 worker_cmd="${REPROQ_WORKER_CMD:-}"
@@ -87,11 +91,19 @@ if [[ -z "$prestart_cmd" || ( "$worker_enabled" -eq 1 && -z "$worker_cmd" ) || "
   fi
 fi
 
+run_prestart() {
+  if ((custom_prestart)); then
+    bash -lc "$prestart_cmd" >/dev/null 2>&1
+  else
+    bash -lc "$prestart_cmd"
+  fi
+}
+
 if [[ -n "$prestart_cmd" ]]; then
   log "prestart checking"
   prestart_started=$(date +%s)
   while true; do
-    if bash -lc "$prestart_cmd"; then
+    if run_prestart; then
       log "prestart ok"
       break
     fi

@@ -235,10 +235,20 @@ def test_nonbeat_scheduler_value_is_not_logged(tmp_path):
 def test_prestart_command_is_not_logged(tmp_path):
     canary = "private-prestart-canary"
     result = run_supervisor(tmp_path, mode="off", low_memory="1", expected_beat="",
-        overrides={"REPROQ_PRESTART_CMD": f"exec @probe prestart # {canary}"})
+        overrides={"REPROQ_PRESTART_CMD": f"printf '%s' {canary}; printf '%s' {canary} >&2\n"
+                   "shopt -s extglob\ncase ready in +(ready)) exec @probe prestart;; esac"})
     assert canary not in result["stdout"] + result["stderr"]
     assert "prestart checking" in result["stdout"]
     assert next(row for row in result["rows"] if row["role"] == "prestart")["arguments"] == ["prestart"]
+
+
+def test_malformed_custom_prestart_cannot_echo_command(tmp_path):
+    canary = "private-prestart-syntax-canary"
+    result = run_supervisor(tmp_path, mode="off", low_memory="1", expected_beat="",
+        overrides={"REPROQ_PRESTART_CMD": f"TOKEN={canary} true )",
+                   "REPROQ_PRESTART_INTERVAL_SECONDS": "0.1"},
+        expected_error="prestart failed after")
+    assert canary not in result["stdout"] + result["stderr"]
 
 
 @pytest.mark.parametrize("active_environment", [True, False])

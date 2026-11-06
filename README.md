@@ -428,8 +428,9 @@ must first be allowed to start. `LOW_MEMORY_MODE=1` does not disable the current
 supervisor's explicitly configured beat process.
 
 Set secrets in the environment and reference them by variable name in a custom
-`REPROQ_PRESTART_CMD`. Bash can include the command text in its syntax error
-diagnostics, and the configured program's output goes to the service logs.
+`REPROQ_PRESTART_CMD`. The supervisor discards custom prestart stdout and stderr,
+including Bash syntax diagnostics that can repeat the command. Supervisor status
+and output from the built-in prestart check remain visible.
 
 ```bash
 uv run python manage.py reproq beat

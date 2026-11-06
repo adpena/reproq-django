@@ -74,7 +74,8 @@ That Django system check does not establish queue schema or worker readiness;
 perform any additional application/release checks in the same reviewed command.
 `REPROQ_PROCESS_ROLE` labels logs and does not enable or disable actors.
 Supervisor status messages omit prestart-command and scheduler-mode values.
-Custom programs retain their own stdout and stderr behavior.
+Custom prestart commands run with stdout and stderr discarded. Use the
+supervisor's status messages to track their exit and retry behavior.
 
 The Django worker passes the selected interpreter to Go's executor through
 `--python-bin`. See the [executor configuration contract](README.md#executor-python-selection-sdk-01531--worker-v00145)
