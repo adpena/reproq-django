@@ -9,6 +9,12 @@
 - Run TEA Data's canonical read-only `scripts/check_workspace_closeout.py` across the task repositories and workspace clones. Standalone clones without that tool must perform equivalent Git inventory, cleanliness, branch and live-remote checks. Audit failures remain unresolved work. The audit does not merge/delete or certify tests. If safe closure needs authorization/authentication or another owner, report the exact retained state and blocker.
 - Keep this policy synchronized across the four TEA Data/ReproQ repositories, without competing cleanup scripts or destructive automatic hooks.
 
+## Landing Review Gate
+
+Use the [Elephant & Goldfish Model](https://github.com/google/elephant-goldfish-model) for every planned change before implementation. Scale the design to the change. Give one fresh Goldfish the draft, applicable standards, and the context needed to challenge it. Record the decisions and use the acceptance criteria to choose checks. Run reviewers one at a time.
+
+Require independent adversarial review of the exact landing diff. After each repair that affects correctness, data integrity, security, or operations, review the repair and adjacent paths that could repeat the failure. Repeat until the exact diff has no open actionable findings. Reuse checks whose inputs still match. A separate broader audit may look for independent failure modes beyond the changed paths.
+
 As an agent working on `reproq-django`, you must adhere to the following standards:
 
 ## 1. Integration Integrity
