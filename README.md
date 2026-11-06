@@ -50,7 +50,7 @@ Package builds require `setuptools>=84.1.0` and `wheel>=0.46.2`.
 
 ## ⚡ Quickstart
 
-[SDK 0.1.531](https://pypi.org/project/reproq-django/0.1.531/) requires
+[SDK 0.1.532](https://pypi.org/project/reproq-django/0.1.532/) requires
 [Reproq Worker v0.0.145](https://github.com/adpena/reproq-worker/releases/tag/v0.0.145)
 with `worker_python_bin:1` and
 the migration-owned schema-v2/executor-protocol2 contract. Worker v0.0.144 does
@@ -131,7 +131,7 @@ invocation. Both invocations use the same committed Django migrations. Use both
 flags when migration execution must be deferred.
 
 ### 5. Download the Compatible Worker
-SDK 0.1.531 selects the compatible v0.0.145 tag by default:
+SDK 0.1.532 selects the compatible v0.0.145 tag by default:
 
 ```bash
 uv run python manage.py reproq install
@@ -427,6 +427,10 @@ clock. Prestart `reproq check` does not wait for due cursors to advance: beat
 must first be allowed to start. `LOW_MEMORY_MODE=1` does not disable the current
 supervisor's explicitly configured beat process.
 
+Set secrets in the environment and reference them by variable name in a custom
+`REPROQ_PRESTART_CMD`. Bash can include the command text in its syntax error
+diagnostics, and the configured program's output goes to the service logs.
+
 ```bash
 uv run python manage.py reproq beat
 # Or invoke this from an external timer; do not also run the long-running beat:
@@ -525,7 +529,9 @@ defaults < config file < env vars < CLI flags. Django management commands derive
 an empty DSN from the selected queue database alias and validate explicit
 file/environment targets against it. The standalone Go CLI also accepts `--dsn`.
 
-### Executor Python selection (SDK 0.1.531 / Worker v0.0.145)
+<a id="executor-python-selection-sdk-01531--worker-v00145"></a>
+
+### Executor Python selection (SDK 0.1.532 / Worker v0.0.145)
 
 This interpreter binding requires the matching Go/SDK pair and queue migrations
 described in Quickstart. Its local checks do not establish application workload,
