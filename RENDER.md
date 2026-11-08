@@ -78,6 +78,9 @@ Custom prestart commands run with stdout and stderr discarded. Use the
 supervisor's status messages to track their exit and retry behavior.
 If the supervisor receives a stop signal during prestart, it cancels startup
 when the current prestart command or retry wait returns.
+After prestart, a stop prevents later role launches, cancels worker and beat
+restart delays, and waits for signaled children to exit. Use `exec` in custom
+role commands to pass signals through to the actual process.
 
 The Django worker passes the selected interpreter to Go's executor through
 `--python-bin`. See the [executor configuration contract](README.md#executor-python-selection-sdk-01531--worker-v00145)

@@ -3,24 +3,45 @@ set -u
 set -o pipefail
 
 stop_requested=0
-child_pids=()
+stop_status=0
+worker_pid=0
+beat_pid=0
+web_pid=0
+direct_web=0
 
 log() {
   printf '[%s] %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$*"
 }
 
+terminate_children() {
+  local worker="$worker_pid" beat="$beat_pid" web="$web_pid" pid
+  worker_pid=0 beat_pid=0 web_pid=0
+  for pid in "$worker" "$beat" "$web"; do
+    if ((pid)); then kill -TERM "$pid" 2>/dev/null || true; fi
+  done
+}
+
 shutdown() {
-  stop_requested=1
-  if ((${#child_pids[@]})); then
-    log "shutdown requested; stopping child processes"
-    for pid in "${child_pids[@]}"; do
-      kill -TERM "$pid" 2>/dev/null || true
-    done
-    wait || true
+  if ((direct_web)); then exit "$1"; fi
+  if ((!stop_requested)); then
+    stop_requested=1 stop_status="$1"
+    terminate_children
   fi
 }
 
-trap shutdown SIGTERM SIGINT
+reap_children() {
+  trap '' SIGTERM SIGINT
+  log "shutdown requested; waiting for child processes"
+  wait || true
+}
+
+trap 'shutdown 143' SIGTERM
+trap 'shutdown 130' SIGINT
+
+exec_if_running() {
+  # The background subshell inherits a stop that arrived just before fork.
+  if ((!stop_requested)); then exec "$@"; fi
+}
 
 restart_delay="${REPROQ_RESTART_DELAY_SECONDS:-5}"
 prestart_cmd="${REPROQ_PRESTART_CMD:-}"
@@ -126,31 +147,52 @@ fi
 run_with_restart() {
   local name="$1"
   local cmd="$2"
-  local cmd_pid=0
+  local child_pid=0 exit_code
 
-  handle_term() {
-    stop_requested=1
-    if [[ "$cmd_pid" -ne 0 ]]; then
-      kill -TERM "$cmd_pid" 2>/dev/null || true
-    fi
+  terminate_child() {
+    local pid="$child_pid"
+    child_pid=0
+    if ((pid)); then kill -TERM "$pid" 2>/dev/null || true; fi
   }
 
-  trap handle_term SIGTERM SIGINT
-
-  while true; do
-    log "${name} starting"
-    bash -lc "$cmd" &
-    cmd_pid=$!
-    wait "$cmd_pid"
-    exit_code=$?
-    cmd_pid=0
-    if [[ "${stop_requested}" -eq 1 ]]; then
-      log "${name} stopped"
-      break
+  wait_for_child() {
+    local pid="$1" status=0
+    child_pid="$pid"
+    if ((stop_requested)); then terminate_child; fi
+    wait "$pid" || status=$?
+    child_pid=0
+    if ((stop_requested)); then
+      trap '' SIGTERM SIGINT
+      wait "$pid" 2>/dev/null || true
     fi
+    return "$status"
+  }
+
+  trap 'stop_requested=1; terminate_child' SIGTERM SIGINT
+
+  while ((!stop_requested)); do
+    log "${name} starting"
+    if ((stop_requested)); then break; fi
+    exec_if_running bash -lc "$cmd" &
+    wait_for_child "$!"
+    exit_code=$?
+    if ((stop_requested)); then break; fi
     log "${name} exited with ${exit_code}; restarting in ${restart_delay}s"
-    sleep "${restart_delay}"
+    if ((stop_requested)); then break; fi
+    exec_if_running sleep "${restart_delay}" &
+    wait_for_child "$!" || true
   done
+  log "${name} stopped"
+}
+
+start_actor() {
+  local pid_variable="$1"
+  shift
+  if ((!stop_requested)); then
+    run_with_restart "$@" &
+    printf -v "$pid_variable" '%d' "$!"
+    if ((stop_requested)); then terminate_children; fi
+  fi
 }
 
 if ((stop_requested)); then
@@ -159,33 +201,47 @@ if ((stop_requested)); then
 fi
 
 if [[ "$worker_enabled" -eq 1 ]]; then
-  run_with_restart "reproq-worker" "REPROQ_PROCESS_ROLE=worker ${worker_cmd}" &
-  child_pids+=("$!")
+  start_actor worker_pid "reproq-worker" "REPROQ_PROCESS_ROLE=worker ${worker_cmd}"
 else
   log "reproq-worker disabled (REPROQ_WORKER_ENABLED=false)"
 fi
 
 if [[ -n "$beat_cmd" ]]; then
-  run_with_restart "reproq-beat" "REPROQ_PROCESS_ROLE=beat ${beat_cmd}" &
-  child_pids+=("$!")
+  start_actor beat_pid "reproq-beat" "REPROQ_PROCESS_ROLE=beat ${beat_cmd}"
 else
   log "reproq-beat disabled (empty REPROQ_BEAT_CMD)"
 fi
 
-log "web starting"
-if ((${#child_pids[@]} == 0)); then
+if ((stop_requested)); then
+  reap_children
+  exit "$stop_status"
+fi
+
+if ((!worker_pid && !beat_pid)); then
   # No actor needs a restart supervisor; retain the web command's exit/signal
   # behavior without an otherwise idle parent process.
+  direct_web=1
+  if ((stop_requested)); then exit "$stop_status"; fi
+  log "web starting"
   exec bash -lc "REPROQ_PROCESS_ROLE=web ${web_cmd}"
 fi
-bash -lc "REPROQ_PROCESS_ROLE=web ${web_cmd}" &
-web_pid=$!
-child_pids+=("$web_pid")
 
-wait "$web_pid"
-web_status=$?
+log "web starting"
+if ((stop_requested)); then
+  reap_children
+  exit "$stop_status"
+fi
+exec_if_running bash -lc "REPROQ_PROCESS_ROLE=web ${web_cmd}" &
+web_process=$!
+web_pid="$web_process"
+if ((stop_requested)); then
+  terminate_children
+  web_status="$stop_status"
+else
+  wait "$web_process"
+  web_status=$? web_pid=0
+fi
 
-stop_requested=1
-shutdown
-
+shutdown 0
+reap_children
 exit "${web_status}"

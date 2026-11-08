@@ -50,12 +50,17 @@ event_file = Path(os.environ["REPROQ_TEST_EVENTS"])
 def stop(signum, frame):
     with event_file.open("a") as stream:
         stream.write(json.dumps({"event": "stop", "role": role, "signal": signum}) + "\\n")
+    if role == "worker" and os.environ["REPROQ_TEST_ENDING"] == "repeat-stop":
+        event_file.with_name("worker-stopping").touch()
+        while not event_file.with_name("worker-release").exists():
+            time.sleep(0.01)
     raise SystemExit(128 + signum)
 signal.signal(signal.SIGTERM, stop)
 descriptor = os.open(event_file, os.O_CREAT | os.O_APPEND | os.O_WRONLY, 0o600)
 try:
     os.write(descriptor, (json.dumps({"event": "start", "role": role, "arguments": arguments,
-        "pid": os.getpid(), "ppid": os.getppid(), "interpreter": sys.executable,
+        "pid": os.getpid(), "ppid": os.getppid(),
+        "selected_runtime": os.environ.get("REPROQ_TEST_SELECTED_RUNTIME"),
         "process_role": os.environ.get("REPROQ_PROCESS_ROLE")}) + "\\n").encode())
 finally:
     os.close(descriptor)
@@ -65,22 +70,26 @@ if role == "prestart":
         while not event_file.with_name("prestart-release").exists():
             time.sleep(0.01)
     raise SystemExit(0)
-if role == "worker" and os.environ.get("REPROQ_TEST_RESTART"):
+ending = os.environ["REPROQ_TEST_ENDING"]
+restart_role = os.environ.get("REPROQ_TEST_RESTART")
+if role == restart_role:
     starts = [json.loads(line) for line in event_file.read_text().splitlines()]
-    if sum(row["event"] == "start" and row["role"] == "worker" for row in starts) == 1:
+    if sum(row["event"] == "start" and row["role"] == role for row in starts) == 1:
         raise SystemExit(23)
 if role == "web":
     required = {"worker"} if os.environ["REPROQ_TEST_EXPECT_WORKER"] == "1" else set()
     if os.environ["REPROQ_TEST_EXPECT_BEAT"]:
         required.add(os.environ["REPROQ_TEST_EXPECT_BEAT"])
+    if ending.startswith("actor-"):
+        required.clear()
     deadline = time.monotonic() + 3
     while time.monotonic() < deadline:
         rows = [json.loads(line) for line in event_file.read_text().splitlines()]
         started = [row for row in rows if row["event"] == "start"]
-        worker_count = sum(row["role"] == "worker" for row in started)
-        expected_workers = (2 if os.environ.get("REPROQ_TEST_RESTART") else 1) if "worker" in required else 0
-        if required <= {row["role"] for row in started} and worker_count >= expected_workers:
-            if os.environ.get("REPROQ_TEST_ENDING") == "term":
+        restart_count = sum(row["role"] == restart_role for row in started)
+        expected_restarts = 2 if restart_role and ending != "backoff-term" else 0
+        if required <= {row["role"] for row in started} and restart_count >= expected_restarts:
+            if ending in {"term", "backoff-term", "actor-register", "actor-fork", "repeat-stop"}:
                 Path(os.environ["REPROQ_TEST_READY"]).touch()
                 break
             raise SystemExit(int(os.environ.get("REPROQ_TEST_WEB_EXIT", "0")))
@@ -92,9 +101,44 @@ while True:
 '''
 
 
+STARTUP_BOUNDARIES = ("parent-register", "actor-register", "actor-fork", "web-fork", "web-register", "direct-exec")
+STARTUP_SIGNAL_HOOK = r'''
+set -T
+inject_signal() {
+  local command="$1"
+  if [[ "$REPROQ_TEST_ENDING" == actor-* && "$command" == 'log "${name} stopped"' ]]; then
+    : > actor-reaped
+  fi
+  if [[ ! -e injected-signal && ( (
+      "$REPROQ_TEST_ENDING" == parent-register && "$BASH_SUBSHELL" -eq 0 &&
+      ( "$command" == 'child_pids+=("$!")' || "$command" == 'printf -v "$pid_variable" '* )
+    ) || (
+      "$REPROQ_TEST_ENDING" == actor-register && "$BASH_SUBSHELL" -gt 0 &&
+      ( "$command" == 'cmd_pid=$!' || "$command" == 'child_pid="$pid"' )
+    ) || (
+      "$REPROQ_TEST_ENDING" == actor-fork && "$BASH_SUBSHELL" -eq 1 &&
+      ( "$command" == 'bash -lc "$cmd"' || "$command" == 'exec_if_running bash -lc "$cmd"' )
+    ) || (
+      "$REPROQ_TEST_ENDING" == web-fork && "$BASH_SUBSHELL" -eq 0 &&
+      ( "$command" == 'bash -lc "REPROQ_PROCESS_ROLE=web ${web_cmd}"' ||
+        "$command" == 'exec_if_running bash -lc "REPROQ_PROCESS_ROLE=web ${web_cmd}"' )
+    ) || (
+      "$REPROQ_TEST_ENDING" == web-register && "$BASH_SUBSHELL" -eq 0 && "$command" == 'web_process=$!'
+    ) || (
+      "$REPROQ_TEST_ENDING" == direct-exec && "$BASH_SUBSHELL" -eq 0 &&
+      "$command" == 'exec bash -lc "REPROQ_PROCESS_ROLE=web ${web_cmd}"'
+    ) ) ]]; then
+    : > injected-signal
+    kill -TERM "$BASHPID"
+  fi
+}
+trap 'inject_signal "$BASH_COMMAND"' DEBUG
+'''
+
+
 def run_supervisor(tmp_path, *, mode, low_memory, expected_beat, beat_command=None,
                    active_environment=True, overrides=None, uv_fails=False,
-                   ending="exit", restart=False, web_exit=0, expected_error=None,
+                   ending="exit", restart_role=None, web_exit=0, expected_error=None,
                    expected_worker=True):
     """Use the real resource; replace only external application commands."""
     probe = tmp_path / "probe.py"
@@ -104,22 +148,32 @@ def run_supervisor(tmp_path, *, mode, low_memory, expected_beat, beat_command=No
     selected_environment = tmp_path / "selected environment with spaces"
     selected_python = selected_environment / "bin" / "python"
     selected_python.parent.mkdir(parents=True)
-    selected_python.symlink_to(sys.executable)
-    (tmp_path / "manage.py").write_text(PROBE)
     python = shlex.quote(sys.executable)
+    selected = shlex.quote(str(selected_python))
+    # Framework Python builds may resolve a symlink before setting
+    # sys.executable. Record the launcher actually invoked instead.
+    selected_python.write_text(f'#!/bin/sh\nexport REPROQ_TEST_SELECTED_RUNTIME={selected}\nexec {python} "$@"\n')
+    selected_python.chmod(0o700)
+    (tmp_path / "manage.py").write_text(PROBE)
     command = f"{python} {shlex.quote(str(probe))}"
     uv = binary_directory / "uv"
     uv_calls = tmp_path / "uv-calls"
     uv.write_text(
         f'#!/bin/sh\nprintf "resolve\\n" >> {shlex.quote(str(uv_calls))}\n'
         + ("exit 17\n" if uv_fails else
-           f'test "$1" = run && test "$2" = python || exit 19\nshift 2\nexec {shlex.quote(str(selected_python))} "$@"\n')
+           'test "$1" = run && test "$2" = python && test "$3" = -c || exit 19\n'
+           f'printf "%s\\n" {selected}\n')
     )
     uv.chmod(0o700)
     # Noninteractive login Bash may reset PATH. BASH_ENV then supplies only the
     # owned fake uv executable; no HOME or global environment is changed.
     bash_environment = tmp_path / "bash-env"
-    bash_environment.write_text(f'export PATH={shlex.quote(str(binary_directory))}:"$PATH"\n')
+    hook = STARTUP_SIGNAL_HOOK if ending in STARTUP_BOUNDARIES else ""
+    bash_environment.write_text(f'export PATH={shlex.quote(str(binary_directory))}:"$PATH"\n{hook}')
+    if ending == "backoff-term":
+        sleep = binary_directory / "sleep"
+        sleep.write_text(f'#!/bin/sh\n: > backoff-ready\nexec {shlex.quote(shutil.which("sleep"))} "$@"\n')
+        sleep.chmod(0o700)
     environment = {
         key: value for key, value in os.environ.items()
         if not key.startswith("REPROQ_") and key not in {"LOW_MEMORY_MODE", "BASH_ENV", "VIRTUAL_ENV"}
@@ -138,8 +192,10 @@ def run_supervisor(tmp_path, *, mode, low_memory, expected_beat, beat_command=No
     })
     if active_environment:
         environment["VIRTUAL_ENV"] = str(selected_environment if active_environment is True else tmp_path / "broken")
-    if restart:
-        environment["REPROQ_TEST_RESTART"] = "1"
+    if restart_role:
+        environment["REPROQ_TEST_RESTART"] = restart_role
+    if ending == "backoff-term":
+        environment["REPROQ_RESTART_DELAY_SECONDS"] = "20"
     if mode is not None:
         environment["REPROQ_SCHEDULER_MODE"] = mode
     if beat_command is not None:
@@ -153,17 +209,33 @@ def run_supervisor(tmp_path, *, mode, low_memory, expected_beat, beat_command=No
         [BASH, str(resource)], cwd=tmp_path, env=environment, text=True, stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True,
     )
+
+    def wait_for_markers(*names):
+        deadline = time.monotonic() + 5
+        while not all((tmp_path / name).exists() for name in names):
+            if process.poll() is not None or time.monotonic() > deadline:
+                pytest.fail(f"The supervisor did not reach {names}")
+            time.sleep(0.01)
+
     try:
-        if ending in {"term", "prestart-term"}:
-            ready = tmp_path / ("prestart-ready" if ending == "prestart-term" else "web-ready")
-            deadline = time.monotonic() + 5
-            while not ready.exists():
-                if process.poll() is not None or time.monotonic() > deadline:
-                    pytest.fail(f"The supervisor did not reach {ready.name} before TERM")
-                time.sleep(0.01)
+        ready_names = {"term": ("web-ready",), "prestart-term": ("prestart-ready",),
+                       "backoff-term": ("backoff-ready",), "actor-register": ("actor-reaped", "web-ready"),
+                       "actor-fork": ("actor-reaped", "web-ready"),
+                       "repeat-stop": ("web-ready",)}
+        if ending in ready_names:
+            wait_for_markers(*ready_names[ending])
             process.send_signal(signal.SIGTERM)
             if ending == "prestart-term":
                 (tmp_path / "prestart-release").touch()
+            if ending == "repeat-stop":
+                wait_for_markers("worker-stopping")
+                rows = [json.loads(line) for line in events.read_text().splitlines()]
+                worker = next(row for row in rows if row["event"] == "start" and row["role"] == "worker")
+                process.send_signal(signal.SIGINT)
+                os.kill(worker["ppid"], signal.SIGTERM)
+                time.sleep(0.05)
+                assert process.poll() is None, "The supervisor exited before the worker completed shutdown"
+                (tmp_path / "worker-release").touch()
         stdout, stderr = process.communicate(timeout=8)
     except subprocess.TimeoutExpired:
         os.killpg(process.pid, signal.SIGKILL)
@@ -184,14 +256,36 @@ def run_supervisor(tmp_path, *, mode, low_memory, expected_beat, beat_command=No
         rows = [json.loads(line) for line in events.read_text().splitlines()]
         assert [(row["event"], row["role"]) for row in rows] == [("start", "prestart")]
         return {"stdout": stdout, "stderr": stderr}
-    assert process.returncode == (143 if ending == "term" else web_exit), (stdout, stderr)
+    if ending in STARTUP_BOUNDARIES:
+        assert process.returncode == 143, (stdout, stderr)
+        assert (tmp_path / "injected-signal").exists()
+        rows = [json.loads(line) for line in events.read_text().splitlines()]
+        started = {row["role"] for row in rows if row["event"] == "start"}
+        if ending == "direct-exec":
+            assert started == {"prestart"}
+        elif ending in {"parent-register", "web-fork"}:
+            assert started <= {"prestart", "worker"}
+        elif ending == "actor-fork":
+            assert started == {"prestart", "web"}
+        elif ending == "actor-register":
+            assert {"prestart", "web"} <= started <= {"prestart", "worker", "web"}
+        else:
+            assert started <= {"prestart", "worker", "web"}
+        for row in rows:
+            if row["event"] == "start":
+                with pytest.raises(ProcessLookupError):
+                    os.kill(row["pid"], 0)
+        return {"stdout": stdout, "stderr": stderr}
+    assert process.returncode == (143 if ending in {"term", "backoff-term", "repeat-stop"} else web_exit), (stdout, stderr)
     all_rows = [json.loads(line) for line in events.read_text().splitlines()]
     rows = [row for row in all_rows if row["event"] == "start"]
     roles = {row["role"] for row in rows}
     assert roles == {"prestart", "web", *(["worker"] if expected_worker else []),
                      *([expected_beat] if expected_beat else [])}, (rows, stdout, stderr)
-    assert sum(row["role"] == expected_beat for row in rows) == bool(expected_beat)
-    assert sum(row["role"] == "worker" for row in rows) == ((2 if restart else 1) if expected_worker else 0)
+    assert sum(row["role"] == expected_beat for row in rows) == (
+        bool(expected_beat) + (restart_role == expected_beat and ending != "backoff-term"))
+    assert sum(row["role"] == "worker" for row in rows) == (
+        expected_worker + (restart_role == "worker" and ending != "backoff-term"))
     if expected_worker:
         assert next(row for row in rows if row["role"] == "worker")["process_role"] == "worker"
     else:
@@ -276,7 +370,7 @@ def test_default_commands_reuse_one_selected_interpreter_with_spaces(tmp_path, a
         expected_beat="beat" if mode == "beat" else "", active_environment=active_environment)
     assert len(result["uv_calls"]) == (0 if active_environment else 1)
     defaults = [row for row in result["rows"] if row["role"] != "web"]
-    assert all(row["interpreter"] == result["selected_python"] for row in defaults)
+    assert all(row["selected_runtime"] == result["selected_python"] for row in defaults)
     worker = next(row for row in defaults if row["role"] == "worker")
     assert worker["arguments"] == ["reproq", "worker", "--concurrency", "3",
                                    "--metrics-addr", "127.0.0.1:9090"]
@@ -380,7 +474,27 @@ def test_failed_runtime_resolution_starts_no_roles(tmp_path):
 @pytest.mark.parametrize("ending", ["exit", "term"])
 def test_selected_runtime_retains_restart_exit_and_shutdown(tmp_path, ending):
     result = run_supervisor(tmp_path, mode="beat", low_memory="1", expected_beat="beat",
-        active_environment=False, ending=ending, restart=True, web_exit=42)
+        active_environment=False, ending=ending, restart_role="worker", web_exit=42)
     assert result["uv_calls"] == ["resolve"]
     stopped = {row["role"] for row in result["events"] if row["event"] == "stop"}
     assert stopped == ({"worker", "beat", "web"} if ending == "term" else {"worker", "beat"})
+
+
+@pytest.mark.parametrize("role", ["worker", "beat"])
+def test_term_during_backoff_does_not_relaunch_actor(tmp_path, role):
+    result = run_supervisor(tmp_path, mode="beat" if role == "beat" else "off", low_memory="1",
+        expected_beat="beat" if role == "beat" else "", expected_worker=role == "worker", ending="backoff-term",
+        restart_role=role, overrides={"REPROQ_WORKER_ENABLED": str(role == "worker").lower()})
+    assert f"reproq-{role} stopped" in result["stdout"]
+
+
+@pytest.mark.parametrize("ending", STARTUP_BOUNDARIES)
+def test_term_at_startup_boundary(tmp_path, ending):
+    worker = ending != "direct-exec"
+    run_supervisor(tmp_path, mode="off", low_memory="1", expected_beat="", expected_worker=worker,
+                   ending=ending, overrides={"REPROQ_WORKER_ENABLED": str(worker).lower()})
+
+
+def test_repeated_signals_do_not_interrupt_child_reaping(tmp_path):
+    result = run_supervisor(tmp_path, mode="off", low_memory="1", expected_beat="", ending="repeat-stop")
+    assert sum(row["event"] == "stop" and row["role"] == "worker" for row in result["events"]) == 1
