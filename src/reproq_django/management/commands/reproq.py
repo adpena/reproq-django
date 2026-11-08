@@ -1,6 +1,5 @@
 import os
 import re
-import shlex
 import subprocess
 import sys
 import platform
@@ -26,6 +25,30 @@ from ...schema_adoption import SchemaAdoptionError, adopt_legacy_schema, inspect
 from ...schema_inspection import SchemaInspectionError
 from ...capabilities import require_worker_capabilities
 from ...worker_install import DEFAULT_WORKER_TAG
+
+
+def _systemd_value(value: str, field: str, *, quoted: bool = False) -> str:
+    if any(character in value for character in "\x00\r\n"):
+        raise CommandError(f"{field} cannot contain NUL or line breaks")
+    literal = value.replace("%", "%%")
+    if quoted:
+        return json.dumps(literal, ensure_ascii=False)
+    if value != value.strip() or value.endswith("\\"):
+        raise CommandError(f"{field} cannot have surrounding whitespace or a trailing backslash")
+    return literal
+
+
+def _systemd_command(executable: str, *arguments: str) -> str:
+    # ':' disables systemd's environment substitution. Each argv item is
+    # quoted for systemd's C-style parser, independently of any shell syntax.
+    return " ".join(_systemd_value(argument, "Systemd command argument", quoted=True)
+                    for argument in (f":{executable}", *arguments))
+
+
+def _systemd_scheduler_condition(mode: str, default: str = "") -> str:
+    script = (f'if [ "${{REPROQ_SCHEDULER_MODE:-{default}}}" = "{mode}" ]; then exit 0; fi; '
+              f'echo "Scheduler mode does not select reproq {mode}."; exit 1')
+    return f"ExecCondition={_systemd_command('/bin/sh', '-c', script)}\n"
 
 
 def _add_worker_install_arguments(parser):
@@ -804,14 +827,23 @@ class Command(BaseCommand):
     def run_systemd(self, options):
         import getpass
         cwd = os.getcwd()
-        python_bin = sys.executable
+        # systemd rejects quotes and backslashes in the executable itself.
+        # Keep the interpreter and its arguments separate from the shell code.
+        python = ("/bin/sh", "-c", 'exec "$@"', "reproq", sys.executable)
         manage_py = os.path.join(cwd, "manage.py")
-        user = options["user"] or getpass.getuser()
-        group = options["group"] or user
+        username = options["user"] or getpass.getuser()
+        user = _systemd_value(username, "--user")
+        group = _systemd_value(options["group"] or username, "--group")
         project_name = os.path.basename(cwd)
-        
+        if (not re.fullmatch(r"[A-Za-z0-9_.:-]+", project_name)
+                or len(f"reproq-schedule-{project_name}.service") > 255):
+            raise CommandError("The project directory name cannot be used in a systemd unit filename")
+        working_directory = _systemd_value(cwd, "Project working directory")
+        schedule = options.get("schedule")
+        schedule_on_calendar = (_systemd_value(options.get("schedule_on_calendar") or "*-*-* *:*:00",
+                                                "--schedule-on-calendar") if schedule else "")
+
         worker_args = [
-            python_bin,
             manage_py,
             "reproq",
             "worker",
@@ -836,52 +868,45 @@ class Command(BaseCommand):
             worker_args.extend(["--metrics-tls-key", options["metrics_tls_key"]])
         if options.get("metrics_tls_client_ca"):
             worker_args.extend(["--metrics-tls-client-ca", options["metrics_tls_client_ca"]])
-        beat_args = [python_bin, manage_py, "reproq", "beat"]
-        schedule_args = [python_bin, manage_py, "reproq", "schedule"]
-
-        def wrap_scheduler_guard(cmd: str, mode: str, default_mode: str | None) -> str:
-            if default_mode is None:
-                env_expr = "${REPROQ_SCHEDULER_MODE:-}"
-            else:
-                env_expr = f"${{REPROQ_SCHEDULER_MODE:-{default_mode}}}"
-            guarded = (
-                f'if [ "{env_expr}" = "{mode}" ]; then {cmd}; '
-                f'else echo "Scheduler mode does not select reproq {mode}."; fi'
-            )
-            return f"/bin/bash -lc '{guarded}'"
-
         services = {
             "worker": {
-                "cmd": " ".join(shlex.quote(str(arg)) for arg in worker_args),
+                "cmd": _systemd_command(*python, *worker_args),
+                "condition": "",
                 "type": "simple",
                 "restart": True,
             },
             "beat": {
-                "cmd": wrap_scheduler_guard(
-                    " ".join(shlex.quote(str(arg)) for arg in beat_args),
-                    "beat",
-                    "beat",
-                ),
+                "cmd": _systemd_command(*python, manage_py, "reproq", "beat"),
+                "condition": _systemd_scheduler_condition("beat", default="beat"),
                 "type": "simple",
                 "restart": True,
             },
         }
+        if schedule:
+            services["schedule"] = {
+                "cmd": _systemd_command(*python, manage_py, "reproq", "schedule"),
+                "condition": _systemd_scheduler_condition("cron"),
+                "type": "oneshot",
+                "restart": False,
+            }
 
         env_lines = []
-        if options.get("env_file"):
-            env_lines.append(f"EnvironmentFile={options['env_file']}")
-        if options.get("metrics_auth_token"):
-            env_lines.append(self._render_env("METRICS_AUTH_TOKEN", options["metrics_auth_token"]))
-        if options.get("metrics_allow_cidrs"):
-            env_lines.append(self._render_env("METRICS_ALLOW_CIDRS", options["metrics_allow_cidrs"]))
-
-        env_block = ""
-        if env_lines:
-            env_block = "\n".join(env_lines) + "\n"
+        if env_path := options.get("env_file"):
+            env_file = os.path.join(working_directory, _systemd_value(env_path, "--env-file"))
+            if env_path.startswith("-/") or any(character in env_file for character in "*?[\\"):
+                raise CommandError("--env-file requires an exact path without optional or glob syntax")
+            env_lines.append(f"EnvironmentFile={env_file}\n")
+        for option, variable in (("metrics_auth_token", "METRICS_AUTH_TOKEN"),
+                                 ("metrics_allow_cidrs", "METRICS_ALLOW_CIDRS")):
+            if value := options.get(option):
+                assignment = _systemd_value(f"{variable}={value}", "--" + option.replace("_", "-"), quoted=True)
+                env_lines.append(f"Environment={assignment}\n")
+        env_block = "".join(env_lines)
 
         for name, service in services.items():
             cmd = service["cmd"]
             service_type = service["type"]
+            condition = service["condition"]
             restart_line = "Restart=always\nRestartSec=5\n" if service["restart"] else ""
             content = f"""[Unit]
 Description=Reproq {name.capitalize()} - {project_name}
@@ -891,44 +916,19 @@ After=network.target postgresql.service
 Type={service_type}
 User={user}
 Group={group}
-WorkingDirectory={cwd}
-{env_block}ExecStart={cmd}
+WorkingDirectory={working_directory}
+{env_block}{condition}ExecStart={cmd}
 {restart_line}
 
 [Install]
 WantedBy=multi-user.target
 """
             service_name = f"reproq-{name}-{project_name}.service"
-            with open(service_name, "w") as f:
+            with open(service_name, "w", encoding="utf-8", newline="\n") as f:
                 f.write(content)
             self.stdout.write(f"Generated {service_name}")
 
-        if options.get("schedule"):
-            schedule_cmd = wrap_scheduler_guard(
-                " ".join(shlex.quote(str(arg)) for arg in schedule_args),
-                "cron",
-                None,
-            )
-            schedule_service = f"""[Unit]
-Description=Reproq Schedule - {project_name}
-After=network.target postgresql.service
-
-[Service]
-Type=oneshot
-User={user}
-Group={group}
-WorkingDirectory={cwd}
-{env_block}ExecStart={schedule_cmd}
-
-[Install]
-WantedBy=multi-user.target
-"""
-            schedule_service_name = f"reproq-schedule-{project_name}.service"
-            with open(schedule_service_name, "w") as f:
-                f.write(schedule_service)
-            self.stdout.write(f"Generated {schedule_service_name}")
-
-            schedule_on_calendar = options.get("schedule_on_calendar") or "*-*-* *:*:00"
+        if schedule:
             schedule_timer = f"""[Unit]
 Description=Reproq Schedule Timer - {project_name}
 
@@ -940,7 +940,7 @@ Persistent=true
 WantedBy=timers.target
 """
             schedule_timer_name = f"reproq-schedule-{project_name}.timer"
-            with open(schedule_timer_name, "w") as f:
+            with open(schedule_timer_name, "w", encoding="utf-8", newline="\n") as f:
                 f.write(schedule_timer)
             self.stdout.write(f"Generated {schedule_timer_name}")
 
@@ -1625,10 +1625,6 @@ WantedBy=timers.target
                 "Cannot verify the downloaded worker. Pin --sha256 or publish a checksum/digest; "
                 "nothing was executed or installed."
             ) from error
-
-    def _render_env(self, key, value):
-        escaped = str(value).replace('"', '\\"')
-        return f'Environment="{key}={escaped}"'
 
     def _compute_allowed_task_modules(self):
         task_paths, errors = self._discover_task_paths()

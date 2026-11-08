@@ -841,14 +841,17 @@ their type or precision is part of the task contract.
 ## 🚀 Production Deployment
 
 ### Recommended Setup (Systemd)
-Generate service files to run the worker and beat processes as background daemons.
+Generate service files to run the worker and beat processes under systemd 251 or newer.
 
 ```bash
 uv run python manage.py reproq systemd --user myuser --concurrency 20
 ```
 
-This generates `reproq-worker.service` and `reproq-beat.service`. Copy them to `/etc/systemd/system/` and enable them.
-You can pass metrics flags (for example `--metrics-addr 127.0.0.1:9090`) or use `--env-file` to load `METRICS_AUTH_TOKEN` and `METRICS_ALLOW_CIDRS`.
+This generates `reproq-worker-<project>.service` and `reproq-beat-<project>.service`.
+Copy them to `/etc/systemd/system/` and enable them.
+You can pass metrics flags (for example `--metrics-addr 127.0.0.1:9090`) or use
+`--env-file` to load `METRICS_AUTH_TOKEN` and `METRICS_ALLOW_CIDRS` from one
+required file. Relative paths are resolved against the project directory.
 
 To use cron-style scheduling instead of a persistent beat process, generate a timer:
 

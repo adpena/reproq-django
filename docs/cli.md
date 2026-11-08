@@ -270,9 +270,10 @@ uv run python manage.py reproq resume-queue maintenance
 ```
 
 ## systemd
-Generate systemd service files for worker and beat. Use `--schedule` to emit a
-cron-style schedule timer/service and set `REPROQ_SCHEDULER_MODE=cron` in your
-environment file to activate it.
+Generate worker and beat service files for systemd 251 or newer. Use `--schedule`
+to emit a cron-style timer and service, and set `REPROQ_SCHEDULER_MODE=cron` in
+your environment file to activate them. If provided, `--env-file` names one
+required file. Relative paths are resolved against the project directory.
 
 ```bash
 uv run python manage.py reproq systemd --user myuser --concurrency 20

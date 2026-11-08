@@ -35,7 +35,9 @@ See the [CLI reference](cli.md) for full command examples.
 
 ## 1. Systemd Configuration (Recommended)
 
-Reproq provides an automated way to generate systemd service files. This is the preferred method for Linux servers.
+Generate service files for Linux servers running systemd 251 or newer. Older
+systems, including Ubuntu 22.04 and Debian 11, can use manually configured units
+for the chosen scheduler. Render uses its own supervisor.
 
 ```bash
 uv run python manage.py reproq systemd --concurrency 20
@@ -46,26 +48,31 @@ To bake metrics settings into the unit files:
 uv run python manage.py reproq systemd --metrics-addr 127.0.0.1:9090 --metrics-allow-cidrs "127.0.0.1/32"
 ```
 
-You can also provide an environment file:
+You can also provide an environment file. Give one exact path. A relative path
+is resolved against the project directory, and the file must exist at service
+startup.
 ```bash
 uv run python manage.py reproq systemd --env-file /etc/reproq-worker.env
 ```
 
-This will output two service files:
-- `reproq-worker.service`: Manages the task execution nodes.
-- `reproq-beat.service`: Manages the periodic task scheduler.
+The project directory name becomes part of the unit filenames. Use a name
+containing letters, digits, periods, underscores, colons or hyphens. The
+generated units include `reproq-worker-<project>.service` for execution and
+`reproq-beat-<project>.service` for periodic scheduling.
 
-The generated beat and schedule guards log which command they skipped without
-printing the configured scheduler value.
+The generated beat and schedule conditions skip startup when the configured
+mode selects another scheduler. A skip does not trigger the beat restart
+policy. The log records which command was skipped.
 
 ### Manual Installation
-Copy the generated files to `/etc/systemd/system/` and enable them:
+For a project directory named `myapp`, copy the generated files to
+`/etc/systemd/system/` and enable them.
 
 ```bash
-sudo cp *.service /etc/systemd/system/
+sudo cp reproq-worker-myapp.service reproq-beat-myapp.service /etc/systemd/system/
 sudo systemctl daemon-reload
-sudo systemctl enable --now reproq-worker
-sudo systemctl enable --now reproq-beat
+sudo systemctl enable --now reproq-worker-myapp.service
+sudo systemctl enable --now reproq-beat-myapp.service
 ```
 
 ## 2. Environment Variables

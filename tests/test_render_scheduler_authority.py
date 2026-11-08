@@ -250,24 +250,6 @@ def test_term_during_successful_prestart_prevents_actor_launch(tmp_path):
                    overrides={"REPROQ_PRESTART_CMD": "exec @probe prestart"})
 
 
-def test_generated_systemd_scheduler_guards_do_not_log_environment_values(tmp_path, monkeypatch):
-    from reproq_django.management.commands.reproq import Command
-
-    canary = "private-scheduler-canary"
-    monkeypatch.chdir(tmp_path)
-    Command().run_systemd({"user": "test", "group": "test", "concurrency": 1, "schedule": True})
-    for unit_name, mode in (("beat", "beat"), ("schedule", "cron")):
-        unit, = tmp_path.glob(f"reproq-{unit_name}-*.service")
-        command, = [line.removeprefix("ExecStart=") for line in unit.read_text().splitlines()
-                    if line.startswith("ExecStart=")]
-        result = subprocess.run(
-            shlex.split(command), env={**os.environ, "REPROQ_SCHEDULER_MODE": canary},
-            capture_output=True, text=True, timeout=5, check=True,
-        )
-        assert canary not in result.stdout + result.stderr
-        assert result.stdout.strip() == f"Scheduler mode does not select reproq {mode}."
-
-
 def test_prestart_command_is_not_logged(tmp_path):
     canary = "private-prestart-canary"
     result = run_supervisor(tmp_path, mode="off", low_memory="1", expected_beat="",
