@@ -55,6 +55,9 @@ This will output two service files:
 - `reproq-worker.service`: Manages the task execution nodes.
 - `reproq-beat.service`: Manages the periodic task scheduler.
 
+The generated beat and schedule guards log which command they skipped without
+printing the configured scheduler value.
+
 ### Manual Installation
 Copy the generated files to `/etc/systemd/system/` and enable them:
 

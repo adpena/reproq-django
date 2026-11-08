@@ -60,6 +60,10 @@ try:
 finally:
     os.close(descriptor)
 if role == "prestart":
+    if os.environ["REPROQ_TEST_ENDING"] == "prestart-term":
+        event_file.with_name("prestart-ready").touch()
+        while not event_file.with_name("prestart-release").exists():
+            time.sleep(0.01)
     raise SystemExit(0)
 if role == "worker" and os.environ.get("REPROQ_TEST_RESTART"):
     starts = [json.loads(line) for line in event_file.read_text().splitlines()]
@@ -150,13 +154,16 @@ def run_supervisor(tmp_path, *, mode, low_memory, expected_beat, beat_command=No
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True,
     )
     try:
-        if ending == "term":
+        if ending in {"term", "prestart-term"}:
+            ready = tmp_path / ("prestart-ready" if ending == "prestart-term" else "web-ready")
             deadline = time.monotonic() + 5
-            while not (tmp_path / "web-ready").exists():
+            while not ready.exists():
                 if process.poll() is not None or time.monotonic() > deadline:
-                    pytest.fail("The supervisor did not start all roles before TERM")
+                    pytest.fail(f"The supervisor did not reach {ready.name} before TERM")
                 time.sleep(0.01)
             process.send_signal(signal.SIGTERM)
+            if ending == "prestart-term":
+                (tmp_path / "prestart-release").touch()
         stdout, stderr = process.communicate(timeout=8)
     except subprocess.TimeoutExpired:
         os.killpg(process.pid, signal.SIGKILL)
@@ -171,6 +178,12 @@ def run_supervisor(tmp_path, *, mode, low_memory, expected_beat, beat_command=No
         assert process.returncode == 1 and expected_error in stdout, (stdout, stderr)
         assert not events.exists()
         return {"uv_calls": calls, "stdout": stdout, "stderr": stderr}
+    if ending == "prestart-term":
+        assert process.returncode == 1, (stdout, stderr)
+        assert "prestart canceled" in stdout and "prestart ok" not in stdout
+        rows = [json.loads(line) for line in events.read_text().splitlines()]
+        assert [(row["event"], row["role"]) for row in rows] == [("start", "prestart")]
+        return {"stdout": stdout, "stderr": stderr}
     assert process.returncode == (143 if ending == "term" else web_exit), (stdout, stderr)
     all_rows = [json.loads(line) for line in events.read_text().splitlines()]
     rows = [row for row in all_rows if row["event"] == "start"]
@@ -230,6 +243,29 @@ def test_nonbeat_scheduler_value_is_not_logged(tmp_path):
     result = run_supervisor(tmp_path, mode=canary, low_memory="1", expected_beat="")
     assert canary not in result["stdout"] + result["stderr"]
     assert "non-beat scheduler mode; disabling reproq-beat." in result["stdout"]
+
+
+def test_term_during_successful_prestart_prevents_actor_launch(tmp_path):
+    run_supervisor(tmp_path, mode="beat", low_memory="0", expected_beat="beat", ending="prestart-term",
+                   overrides={"REPROQ_PRESTART_CMD": "exec @probe prestart"})
+
+
+def test_generated_systemd_scheduler_guards_do_not_log_environment_values(tmp_path, monkeypatch):
+    from reproq_django.management.commands.reproq import Command
+
+    canary = "private-scheduler-canary"
+    monkeypatch.chdir(tmp_path)
+    Command().run_systemd({"user": "test", "group": "test", "concurrency": 1, "schedule": True})
+    for unit_name, mode in (("beat", "beat"), ("schedule", "cron")):
+        unit, = tmp_path.glob(f"reproq-{unit_name}-*.service")
+        command, = [line.removeprefix("ExecStart=") for line in unit.read_text().splitlines()
+                    if line.startswith("ExecStart=")]
+        result = subprocess.run(
+            shlex.split(command), env={**os.environ, "REPROQ_SCHEDULER_MODE": canary},
+            capture_output=True, text=True, timeout=5, check=True,
+        )
+        assert canary not in result.stdout + result.stderr
+        assert result.stdout.strip() == f"Scheduler mode does not select reproq {mode}."
 
 
 def test_prestart_command_is_not_logged(tmp_path):

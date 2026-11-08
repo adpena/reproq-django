@@ -846,7 +846,7 @@ class Command(BaseCommand):
                 env_expr = f"${{REPROQ_SCHEDULER_MODE:-{default_mode}}}"
             guarded = (
                 f'if [ "{env_expr}" = "{mode}" ]; then {cmd}; '
-                f'else echo "REPROQ_SCHEDULER_MODE=${{REPROQ_SCHEDULER_MODE}}; skipping reproq {mode}."; fi'
+                f'else echo "Scheduler mode does not select reproq {mode}."; fi'
             )
             return f"/bin/bash -lc '{guarded}'"
 

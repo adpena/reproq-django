@@ -102,14 +102,15 @@ run_prestart() {
 if [[ -n "$prestart_cmd" ]]; then
   log "prestart checking"
   prestart_started=$(date +%s)
-  while true; do
-    if run_prestart; then
-      log "prestart ok"
+  while (( ! stop_requested )); do
+    prestart_status=0
+    run_prestart || prestart_status=$?
+    if ((stop_requested)); then
       break
     fi
-    if [[ "${stop_requested}" -eq 1 ]]; then
-      log "prestart canceled"
-      exit 1
+    if ((prestart_status == 0)); then
+      log "prestart ok"
+      break
     fi
     now=$(date +%s)
     elapsed=$((now - prestart_started))
@@ -151,6 +152,11 @@ run_with_restart() {
     sleep "${restart_delay}"
   done
 }
+
+if ((stop_requested)); then
+  log "prestart canceled"
+  exit 1
+fi
 
 if [[ "$worker_enabled" -eq 1 ]]; then
   run_with_restart "reproq-worker" "REPROQ_PROCESS_ROLE=worker ${worker_cmd}" &

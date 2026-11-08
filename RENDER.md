@@ -76,6 +76,8 @@ perform any additional application/release checks in the same reviewed command.
 Supervisor status messages omit prestart-command and scheduler-mode values.
 Custom prestart commands run with stdout and stderr discarded. Use the
 supervisor's status messages to track their exit and retry behavior.
+If the supervisor receives a stop signal during prestart, it cancels startup
+when the current prestart command or retry wait returns.
 
 The Django worker passes the selected interpreter to Go's executor through
 `--python-bin`. See the [executor configuration contract](README.md#executor-python-selection-sdk-01531--worker-v00145)
