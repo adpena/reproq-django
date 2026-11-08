@@ -181,6 +181,7 @@ def test_foreground_binds_real_selected_python_with_spaces_despite_another_ambie
     other.write_text('#!/bin/sh\nprintf wrong > ' + shlex.quote(str(ambient_marker)) + '\nexit 19\n')
     other.chmod(0o755)
     record = root / "selected-executor.json"
+    launcher = root / "launching-interpreter"
     response = {**executor_capabilities(), "worker_version": "owned", "operations": {"worker_python_bin": 1}}
     worker = root / "binding-worker"
     probe = (
@@ -195,6 +196,8 @@ def test_foreground_binds_real_selected_python_with_spaces_despite_another_ambie
                       + shlex.quote(sys.executable) + ' -c ' + shlex.quote(probe) + ' "$@"\n')
     worker.chmod(0o755)
     source = (
+        "import sys; from pathlib import Path; "
+        f"Path({str(launcher)!r}).write_text(sys.executable); "
         "import django; django.setup(); from django.core.management import call_command; "
         "from django.db.backends.base.base import BaseDatabaseWrapper; "
         "from reproq_django.management.commands.reproq import Command; "
@@ -206,5 +209,7 @@ def test_foreground_binds_real_selected_python_with_spaces_despite_another_ambie
     result = subprocess.run([str(selected), "-c", source], cwd=root, env=environment, capture_output=True, timeout=30)
     assert result.returncode == 0, result.stderr
     observed = json.loads(record.read_text())
-    assert observed == {"python": str(selected), "exit": 0, "capabilities": executor_capabilities()}
+    launching_interpreter = launcher.read_text()
+    assert os.path.samefile(launching_interpreter, selected)
+    assert observed == {"python": launching_interpreter, "exit": 0, "capabilities": executor_capabilities()}
     assert not ambient_marker.exists()

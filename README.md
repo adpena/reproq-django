@@ -27,7 +27,7 @@ Reproq is split into two specialized components:
 
 | Component | Supported |
 | :--- | :--- |
-| Django | 6.x; Python 3.12–3.14 requires `Django>=6.0.9,!=6.1.0,!=6.1.1,<7.0`, and Python 3.15 requires `Django>=6.1.2,<7.0` |
+| Django | Python 3.12–3.14 supports Django 6.0.10 or later in the 6.0 series, or Django 6.1.3 or later in 6.x. Python 3.15 requires Django 6.1.3 or later in 6.x. |
 | Python | 3.12–3.15, checked locally with isolated locked environments |
 | Reproq Worker | Release tested with this SDK (install/upgrade via `uv run python manage.py reproq install` / `upgrade`) |
 
@@ -38,12 +38,11 @@ the SDK derives queue connections from the selected Django alias and preserves
 that business environment for task execution. Queue names must route to the
 selected alias through `REPROQ_QUEUE_DATABASES`.
 
-This repository's lock uses Django 6.1.2 and `psycopg[binary]` 3.3.6, the
-pairing exercised by the locked Python 3.15 checks. Django first added official
-Python 3.15 support in [6.1.3](https://docs.djangoproject.com/en/6.1/releases/6.1.3/).
-The table gives the package's accepted version ranges. See Django's
-[November 3 security advisory](https://www.djangoproject.com/weblog/2026/nov/03/security-releases/)
-for the fixes in Django 6.1.3 and 6.0.10 before selecting deployment versions.
+The [package requirements](pyproject.toml) exclude the affected Django
+versions in the [November 3 security advisory](https://www.djangoproject.com/weblog/2026/nov/03/security-releases/).
+The locked Python checks use Django 6.1.3, which added
+[official Python 3.15 support](https://docs.djangoproject.com/en/6.1/releases/6.1.3/),
+and `psycopg[binary]` 3.3.6.
 Package builds require `setuptools>=84.1.0` and `wheel>=0.46.2`.
 
 ---
