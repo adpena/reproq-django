@@ -49,7 +49,7 @@ Package builds require `setuptools>=84.1.0` and `wheel>=0.46.2`.
 
 ## ⚡ Quickstart
 
-[SDK 0.1.532](https://pypi.org/project/reproq-django/0.1.532/) requires
+[SDK 0.1.533](https://pypi.org/project/reproq-django/0.1.533/) requires
 [Reproq Worker v0.0.145](https://github.com/adpena/reproq-worker/releases/tag/v0.0.145)
 with `worker_python_bin:1` and
 the migration-owned schema-v2/executor-protocol2 contract. Worker v0.0.144 does
@@ -58,16 +58,16 @@ coordinated change; the historical-schema adoption and draining requirements
 below still apply. Package publication does not qualify a production cutover.
 
 ### 1. Install
-Install SDK 0.1.532 from PyPI:
+Install SDK 0.1.533 from PyPI:
 
 ```bash
-uv add 'reproq-django==0.1.532'
+uv add 'reproq-django==0.1.533'
 ```
 
 Alternatively, use the version-pinned GitHub release tag:
 
 ```bash
-uv add "reproq-django @ git+https://github.com/adpena/reproq-django.git@v0.1.532"
+uv add "reproq-django @ git+https://github.com/adpena/reproq-django.git@v0.1.533"
 ```
 
 For reviewed paired development, add the local SDK instead:
@@ -130,7 +130,7 @@ invocation. Both invocations use the same committed Django migrations. Use both
 flags when migration execution must be deferred.
 
 ### 5. Download the Compatible Worker
-SDK 0.1.532 selects the compatible v0.0.145 tag by default:
+SDK 0.1.533 selects the compatible v0.0.145 tag by default:
 
 ```bash
 uv run python manage.py reproq install
