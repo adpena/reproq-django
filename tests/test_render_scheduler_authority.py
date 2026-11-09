@@ -54,6 +54,8 @@ def stop(signum, frame):
         event_file.with_name("worker-stopping").touch()
         while not event_file.with_name("worker-release").exists():
             time.sleep(0.01)
+    if role == "web" and os.environ["REPROQ_TEST_ENDING"] == "web-wait":
+        raise SystemExit(0)
     raise SystemExit(128 + signum)
 signal.signal(signal.SIGTERM, stop)
 descriptor = os.open(event_file, os.O_CREAT | os.O_APPEND | os.O_WRONLY, 0o600)
@@ -89,7 +91,7 @@ if role == "web":
         restart_count = sum(row["role"] == restart_role for row in started)
         expected_restarts = 2 if restart_role and ending != "backoff-term" else 0
         if required <= {row["role"] for row in started} and restart_count >= expected_restarts:
-            if ending in {"term", "backoff-term", "actor-register", "actor-fork", "repeat-stop"}:
+            if ending in {"term", "backoff-term", "actor-register", "actor-fork", "repeat-stop", "web-wait"}:
                 Path(os.environ["REPROQ_TEST_READY"]).touch()
                 break
             raise SystemExit(int(os.environ.get("REPROQ_TEST_WEB_EXIT", "0")))
@@ -101,11 +103,23 @@ while True:
 '''
 
 
-STARTUP_BOUNDARIES = ("parent-register", "actor-register", "actor-fork", "web-fork", "web-register", "direct-exec")
+STARTUP_BOUNDARIES = ("parent-register", "actor-register", "actor-fork", "web-fork", "web-register", "direct-exec", "web-wait")
 STARTUP_SIGNAL_HOOK = r'''
 set -T
 inject_signal() {
   local command="$1"
+  if [[ "$REPROQ_TEST_ENDING" == web-wait && "$BASH_SUBSHELL" -eq 0 &&
+        "$command" == 'wait "$web_process"' && ! -e injected-signal ]]; then
+    local attempt
+    for attempt in {1..400}; do
+      if [[ -e web-ready ]]; then
+        : > injected-signal
+        kill -TERM "$BASHPID"
+        break
+      fi
+      sleep 0.01
+    done
+  fi
   if [[ "$REPROQ_TEST_ENDING" == actor-* && "$command" == 'log "${name} stopped"' ]]; then
     : > actor-reaped
   fi
@@ -269,6 +283,9 @@ def run_supervisor(tmp_path, *, mode, low_memory, expected_beat, beat_command=No
             assert started == {"prestart", "web"}
         elif ending == "actor-register":
             assert {"prestart", "web"} <= started <= {"prestart", "worker", "web"}
+        elif ending == "web-wait":
+            assert started == {"prestart", "worker", "web"}
+            assert {row["role"] for row in rows if row["event"] == "stop"} == {"worker", "web"}
         else:
             assert started <= {"prestart", "worker", "web"}
         for row in rows:

@@ -244,4 +244,5 @@ fi
 
 shutdown 0
 reap_children
+if ((stop_status)); then exit "$stop_status"; fi
 exit "${web_status}"
