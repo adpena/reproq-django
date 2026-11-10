@@ -529,8 +529,9 @@ an empty DSN from the selected queue database alias and validate explicit
 file/environment targets against it. The standalone Go CLI also accepts `--dsn`.
 
 <a id="executor-python-selection-sdk-01531--worker-v00145"></a>
+<a id="executor-python-selection-sdk-01532--worker-v00145"></a>
 
-### Executor Python selection (SDK 0.1.532 / Worker v0.0.145)
+### Executor Python selection
 
 This interpreter binding requires the matching Go/SDK pair and queue migrations
 described in Quickstart. Its local checks do not establish application workload,

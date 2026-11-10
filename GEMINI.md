@@ -40,9 +40,10 @@ Explicit worker pruning uses that database clock too, with its existing age
 thresholds, aliases and admin selection; observation commands never prune.
 
 ## Runtime Contract
-SDK 0.1.531 requires worker v0.0.145 and the migration-owned schema2/executor
-protocol2 contract before claims. Apply the coordinated queue migrations, with
-historical-schema adoption and draining where required; worker v0.0.144 is incompatible.
+Use the [current Worker and SDK pair](README.md#-quickstart) and the migration-owned
+schema2/executor protocol2 contract before claims. Apply the coordinated queue
+migrations, with historical-schema adoption and draining where required.
+Worker v0.0.144 is incompatible with the current contract.
 This executor binding requires worker_python_bin operation version1. Django's default
 executor is its UV-selected sys.executable, passed with --python-bin; explicit
 file/CLI choices take precedence. Portable init templates omit python_bin.
@@ -87,7 +88,7 @@ multiple databases is rejected rather than guessing the result's database.
 - Preserve published tags, releases, and assets for reproducibility. Retire obsolete current code and active artifacts instead; never move a released tag or replace published assets.
 - Publish matching worker assets before distributing a new SDK. Preserve
   compatibility for SDK 0.1.530, whose installer follows GitHub's `latest`
-  pointer. Worker v0.0.145 was published with `latest=false` for this reason.
+  pointer. Keep it at Worker v0.0.144 and publish newer tags with `latest=false`.
   Application migration and production cutover require separate qualification.
 
 ## Testing

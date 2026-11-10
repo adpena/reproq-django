@@ -122,7 +122,7 @@ uv run python manage.py reproq doctor --strict
 Example output:
 ```
 🔎 Reproq Doctor
-✅ Worker binary: 0.0.145
+✅ Worker binary: 0.0.146
 ✅ Database connection ok.
 ✅ Reproq schema present.
 ✨ Doctor completed with no blocking issues.
