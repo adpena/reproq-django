@@ -40,9 +40,9 @@ selected alias through `REPROQ_QUEUE_DATABASES`.
 
 The [package requirements](pyproject.toml) exclude the affected Django
 versions in the [November 3 security advisory](https://www.djangoproject.com/weblog/2026/nov/03/security-releases/).
-The locked Python checks use Django 6.1.3, which added
-[official Python 3.15 support](https://docs.djangoproject.com/en/6.1/releases/6.1.3/),
-and `psycopg[binary]` 3.3.6.
+The [repository lockfile](https://github.com/adpena/reproq-django/blob/main/uv.lock)
+records the dependency versions used by the locked Python checks.
+Django 6.1.3 added [official Python 3.15 support](https://docs.djangoproject.com/en/6.1/releases/6.1.3/).
 Package builds require `setuptools>=84.1.0` and `wheel>=0.46.2`.
 
 ---
