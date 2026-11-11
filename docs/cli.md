@@ -90,7 +90,7 @@ uv run python manage.py reproq install
 ```
 
 Install, init, and upgrade default to the worker release tested with this SDK.
-SDK 0.1.534 selects v0.0.146. An explicit `--tag` selects a different release
+SDK 0.1.535 selects v0.0.147. An explicit `--tag` selects a different release
 subject to the SDK's compatibility checks. See the [pinned installation
 instructions](../README.md#5-download-the-compatible-worker) for platform
 digests and source-build behavior.
@@ -122,7 +122,7 @@ uv run python manage.py reproq doctor --strict
 Example output:
 ```
 🔎 Reproq Doctor
-✅ Worker binary: 0.0.146
+✅ Worker binary: 0.0.147
 ✅ Database connection ok.
 ✅ Reproq schema present.
 ✨ Doctor completed with no blocking issues.

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "reproq-django"
-version = "0.1.534"
+version = "0.1.535"
 description = "Django 6.0 Tasks backend for reproq-worker (Postgres queue + deterministic runner)"
 readme = "README.md"
 authors = [{name = "Alejandro Peña", email = "adpena@gmail.com"}]

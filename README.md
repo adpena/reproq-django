@@ -49,24 +49,24 @@ Package builds require `setuptools>=84.1.0` and `wheel>=0.46.2`.
 
 ## ⚡ Quickstart
 
-[SDK 0.1.534](https://pypi.org/project/reproq-django/0.1.534/) defaults to
-[Reproq Worker v0.0.146](https://github.com/adpena/reproq-worker/releases/tag/v0.0.146)
+[SDK 0.1.535](https://pypi.org/project/reproq-django/0.1.535/) defaults to
+[Reproq Worker v0.0.147](https://github.com/adpena/reproq-worker/releases/tag/v0.0.147)
 with `worker_python_bin:1` and the migration-owned schema-v2/executor-protocol2
 contract. Worker v0.0.145 also implements that contract. For upgrades from
 older queue schemas, follow the historical-schema adoption and draining
 requirements below.
 
 ### 1. Install
-Install SDK 0.1.534 from PyPI:
+Install SDK 0.1.535 from PyPI:
 
 ```bash
-uv add 'reproq-django==0.1.534'
+uv add 'reproq-django==0.1.535'
 ```
 
 Alternatively, use the version-pinned GitHub release tag:
 
 ```bash
-uv add "reproq-django @ git+https://github.com/adpena/reproq-django.git@v0.1.534"
+uv add "reproq-django @ git+https://github.com/adpena/reproq-django.git@v0.1.535"
 ```
 
 For reviewed paired development, add the local SDK instead:
@@ -116,7 +116,7 @@ Django migrations. This package's migrations own the queue schema.
 uv run python manage.py reproq init
 ```
 
-For reviewed paired development, select the local v0.0.146 worker and skip
+For reviewed paired development, select the local v0.0.147 worker and skip
 the hosted download:
 
 ```bash
@@ -129,7 +129,7 @@ invocation. Both invocations use the same committed Django migrations. Use both
 flags when migration execution must be deferred.
 
 ### 5. Download the Compatible Worker
-SDK 0.1.534 selects the compatible v0.0.146 tag by default:
+SDK 0.1.535 selects the compatible v0.0.147 tag by default:
 
 ```bash
 uv run python manage.py reproq install
@@ -140,11 +140,11 @@ binary from GitHub. Reviewed paired development can use the local selector above
 Downloads must match the publisher's checksum sidecar or GitHub release-asset
 SHA-256 digest before the binary is made executable or its version is queried.
 For reproducible deployment, pin both a release tag and the digest of the
-binary for the target OS and architecture. For v0.0.146, use the reviewed digest
+binary for the target OS and architecture. For v0.0.147, use the reviewed digest
 of that release's binary for the selected platform:
 
 ~~~bash
-uv run python manage.py reproq install --tag v0.0.146 --sha256 <platform-binary-sha256>
+uv run python manage.py reproq install --tag v0.0.147 --sha256 <platform-binary-sha256>
 ~~~
 
 The same options work with init and upgrade. An explicit digest disables
