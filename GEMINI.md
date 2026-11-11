@@ -40,6 +40,17 @@ Explicit worker pruning uses that database clock too, with its existing age
 thresholds, aliases and admin selection; observation commands never prune.
 
 ## Runtime Contract
+
+Unreleased source supports optional notification-assisted waiting. Poll remains
+the default. Backend OPTIONS.WAKE_NOTIFICATIONS is a strict boolean; validate
+every route before writes and send one empty post-commit hint per operation and
+database. Mixed workflows opt in if any included backend opts in. Hint failures
+must not reject committed tasks. The foreground command requires exact Worker
+notification_wait operation1 before notify mode. The current published Worker
+0.0.147 lacks it. Use session-compatible PostgreSQL; transaction poolers need
+poll mode. This adds no DDL and changes neither claim authority nor recovery
+bounds. Go transitions, pg_cron/direct SQL and older producers remain timer-
+recovery dependent. Running cancellation remains heartbeat-driven.
 Use the [current Worker and SDK pair](README.md#-quickstart) and the migration-owned
 schema2/executor protocol2 contract before claims. Apply the coordinated queue
 migrations, with historical-schema adoption and draining where required.

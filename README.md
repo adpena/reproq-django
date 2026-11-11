@@ -656,6 +656,26 @@ recover the workflow, or explicitly replay one task as a detached new task.
 
 ## 🔁 Retries & Backoff
 
+### Optional arrival notifications (unreleased source)
+
+The paired source Worker supports `--wait-mode notify`, `REPROQ_WAIT_MODE=notify`
+or `worker.wait_mode` in its config. The Django foreground command checks exact
+`notification_wait: 1` capability before starting notify mode. Published Worker
+0.0.147 does not support it. Polling remains the default.
+
+Set backend `OPTIONS["WAKE_NOTIFICATIONS"] = True` (a boolean) to send empty
+PostgreSQL hints after committed enqueue operations. Single/deduplicated enqueue
+sends one hint; bulk/workflows send one per affected database, with mixed-backend
+workflows opting in when any node opts in. Rollback discards callbacks, public
+per-result signals retain their behavior, and a failed hint logs a warning
+without rejecting already-committed work. No producer thread is created.
+
+Notify mode adds one session connection, requires session-compatible PostgreSQL,
+and is unsuitable for PgBouncer transaction pooling. SQL claims remain the
+authority. Recovery intervals remain unchanged for older producers, pg_cron,
+Go transitions, retries, delayed work and lost hints. Running cancellation stays
+heartbeat-driven. See the [full contract and measurement limits](https://github.com/adpena/reproq-worker/blob/main/docs/notification-waiting.md).
+
 Retries are managed by the Go worker. When a task fails and attempts remain, it is re-queued with an **exponential backoff**:
 
 - Base delay: 30s

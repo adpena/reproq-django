@@ -89,6 +89,34 @@ def test_foreign_host_flags_do_not_invent_command_overrides(foreground, monkeypa
     assert result.argv == ["owned-reproq", subcommand, "--config", str(foreground.config)]
 
 
+@pytest.mark.parametrize("selection", ["environment", "file", "cli"])
+def test_notify_requires_exact_worker_operation_before_exec(foreground, monkeypatch, selection):
+    reproq.require_worker_capabilities.return_value = {"operations": {"notification_wait": True}}
+    options = {}
+    if selection == "environment":
+        monkeypatch.setenv("REPROQ_WAIT_MODE", "notify")
+    elif selection == "file":
+        foreground.config.write_text('[worker]\nwait_mode = "notify"\npython_bin = "operator-python"\n')
+    else:
+        options["wait_mode"] = "notify"
+    with pytest.raises(CommandError, match="notification_wait operation version 1"):
+        foreground.invoke(**options)
+    foreground.execute.assert_not_called()
+    reproq.require_worker_capabilities.return_value = {"operations": {"notification_wait": 1}}
+    result = foreground.invoke(**options)
+    if selection == "environment":
+        assert result.environment["REPROQ_WAIT_MODE"] == "notify"
+    if selection == "cli":
+        assert result.argv[result.argv.index("--wait-mode") + 1] == "notify"
+
+
+@pytest.mark.parametrize("mode", ["false", "", "automatic"])
+def test_invalid_notification_mode_rejected_without_start(foreground, mode):
+    with pytest.raises(CommandError, match="poll or notify"):
+        foreground.invoke(wait_mode=mode)
+    foreground.execute.assert_not_called()
+
+
 @pytest.mark.parametrize("form", ["kwargs", "cli"])
 def test_default_config_is_resolved_before_explicit_overrides(foreground, monkeypatch, form):
     monkeypatch.delenv("REPROQ_CONFIG")

@@ -14,6 +14,7 @@ from .backend import ReproqBackend
 from .db import resolve_queue_db, validate_result_id_routing
 from .models import TaskRun, WorkflowRun
 from .schema_contract import require_schema_contract
+from .wakeup import schedule_notification
 
 
 BATCH_SIZE = 1000
@@ -89,8 +90,11 @@ def _insert_nodes(nodes, workflow_id, *, sequential=False, callback=False):
             )
         results = [node.backend._result_proxy(run.pk, db_alias=alias)._bind_run(run, prime_arguments=False)
                    for node, run in zip(nodes, runs, strict=True)]
+        if any(node.backend.options.get("WAKE_NOTIFICATIONS", False) for node in nodes):
+            # _prepare validated every backend and route before this write block.
+            schedule_notification(alias)
         for node, result in zip(nodes, results, strict=True):
-            node.backend._notify_enqueued(result, node.fields["spec_json"], alias)
+            node.backend._notify_enqueued(result, node.fields["spec_json"], alias, notify_worker=False)
     return results
 
 

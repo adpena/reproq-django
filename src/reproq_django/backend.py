@@ -15,6 +15,7 @@ from .db import format_result_id, parse_result_id, resolve_queue_db, validate_re
 from .signals import task_enqueued
 from .schema_contract import require_schema_contract
 from .concurrency import task_option
+from .wakeup import schedule_notification, validate_notifications
 
 def _chunked(values: list[str], size: int = 1000):
     for idx in range(0, len(values), size):
@@ -37,7 +38,9 @@ class ReproqBackend(BaseTaskBackend):
     supports_get_result = True
     supports_async_task = True
 
-    def _notify_enqueued(self, result, spec, alias):
+    def _notify_enqueued(self, result, spec, alias, *, notify_worker=True):
+        if notify_worker and validate_notifications(self.options, alias):
+            schedule_notification(alias)
         transaction.on_commit(
             lambda: task_enqueued.send(sender=self.__class__, task_result=result, spec=spec),
             using=alias,
@@ -92,6 +95,7 @@ class ReproqBackend(BaseTaskBackend):
             priority = 0
         queue_name = task.queue_name or "default"
         self._validate_queue(queue_name)
+        validate_notifications(self.options, resolve_queue_db(queue_name))
         concurrency_key, concurrency_limit = self._resolve_concurrency(task, args, kwargs)
         spec = build_spec(
             task_path=task.module_path, args=args, kwargs=kwargs, backend_alias=self.alias,
@@ -221,8 +225,11 @@ class ReproqBackend(BaseTaskBackend):
                     result_id = self._insert_prepared(entry, alias)
                 results[id(entry)] = self._result_proxy(result_id, db_alias=alias)
 
+        for alias in grouped:
+            if validate_notifications(self.options, alias):
+                schedule_notification(alias)
         for alias, entry in ordered:
-            self._notify_enqueued(results[id(entry)], entry["spec_json"], alias)
+            self._notify_enqueued(results[id(entry)], entry["spec_json"], alias, notify_worker=False)
         return [results[id(entry)] for _, entry in ordered]
 
     def _insert_prepared(self, entry, alias):

@@ -81,6 +81,7 @@ class Command(BaseCommand):
         # Go owns ordinary runtime defaults after file/environment overrides.
         worker_parser.add_argument("--config", type=str, default=None, help="Path to reproq config file")
         worker_parser.add_argument("--concurrency", type=int, default=None)
+        worker_parser.add_argument("--wait-mode", type=str, default=None, help="poll|notify; notify requires a compatible Worker and PostgreSQL session endpoint")
         worker_parser.add_argument("--queues", type=str, default=None, help="Comma-separated queue names")
         worker_parser.add_argument("--database", type=str, default=None, help="Django database alias for worker DSN")
         worker_parser.add_argument("--allowed-task-modules", type=str, default=None, help="Comma-separated task module allow-list")
@@ -1197,11 +1198,11 @@ WantedBy=timers.target
                 f"Worker binary not found (resolved: {resolved_bin or worker_bin}). {hint}"
             )
         try:
-            require_worker_capabilities(worker_bin)
+            capabilities = require_worker_capabilities(worker_bin)
         except ValueError as error:
             raise CommandError(str(error)) from error
         runtime_names = (
-            "concurrency", "queues", "allowed_task_modules", "logs_dir", "payload_mode", "python_bin",
+            "concurrency", "queues", "allowed_task_modules", "logs_dir", "payload_mode", "python_bin", "wait_mode",
             "metrics_port", "metrics_addr", "metrics_auth_token", "metrics_allow_cidrs",
             "metrics_tls_cert", "metrics_tls_key", "metrics_tls_client_ca",
             "metrics_auth_limit", "metrics_auth_window", "metrics_auth_max_entries",
@@ -1227,6 +1228,13 @@ WantedBy=timers.target
             raise CommandError("; ".join(errors))
         effective, sources = self._effective_config(file_config, env_config)
         if cmd == "worker":
+            mode = overrides.get("wait_mode", effective["worker"].get("wait_mode", "poll"))
+            if not isinstance(mode, str) or mode.strip().lower() not in {"poll", "notify"}:
+                raise CommandError("worker.wait_mode must be poll or notify")
+            if mode.strip().lower() == "notify":
+                operations = capabilities.get("operations", {}) if isinstance(capabilities, dict) else {}
+                if type(operations.get("notification_wait")) is not int or operations["notification_wait"] != 1:
+                    raise CommandError("Notify mode requires Worker notification_wait operation version 1; install a compatible reviewed Worker or select poll")
             python_bin = overrides.get("python_bin", effective["worker"]["python_bin"])
             if not isinstance(python_bin, str) or not python_bin.strip():
                 raise CommandError("worker.python_bin must name a Python executable")
@@ -1927,6 +1935,13 @@ WantedBy=timers.target
 
         if os.environ.get("WORKER_ID"):
             set_path(["worker", "worker_id"], os.environ["WORKER_ID"])
+
+        if "REPROQ_WAIT_MODE" in os.environ:
+            mode = os.environ["REPROQ_WAIT_MODE"].strip().lower()
+            if mode not in {"poll", "notify"}:
+                errors.append("REPROQ_WAIT_MODE must be poll or notify")
+            else:
+                set_path(["worker", "wait_mode"], mode)
 
         if os.environ.get("QUEUE_NAMES"):
             set_path(
