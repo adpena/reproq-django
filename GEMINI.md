@@ -41,7 +41,7 @@ thresholds, aliases and admin selection; observation commands never prune.
 
 ## Runtime Contract
 
-Unreleased source supports optional notification-assisted waiting. Poll remains
+Worker 0.0.148 / SDK 0.1.536 support optional notification-assisted waiting. Poll remains
 the default. Backend OPTIONS.WAKE_NOTIFICATIONS is a strict boolean; validate
 every route before writes and send one empty post-commit hint per operation and
 database. Mixed workflows opt in if any included backend opts in. Hint failures

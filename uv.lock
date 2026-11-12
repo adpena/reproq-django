@@ -198,7 +198,7 @@ wheels = [
 
 [[package]]
 name = "reproq-django"
-version = "0.1.535"
+version = "0.1.536"
 source = { editable = "." }
 dependencies = [
     { name = "croniter" },

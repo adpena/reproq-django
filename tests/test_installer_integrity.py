@@ -200,14 +200,14 @@ def test_every_install_entry_point_accepts_the_same_integrity_arguments(subcomma
 def test_every_install_entry_point_defaults_to_the_sdk_tested_worker(subcommand):
     parser = reproq.Command().create_parser("manage.py", "reproq")
     options = parser.parse_args([subcommand])
-    assert options.tag == reproq.DEFAULT_WORKER_TAG == "v0.0.147"
+    assert options.tag == reproq.DEFAULT_WORKER_TAG == "v0.0.148"
 
 
 def test_default_download_uses_an_immutable_compatible_release(installation, monkeypatch):
     requests = serve(monkeypatch)
     reproq.Command().run_install({"sha256": DIGEST})
     assert requests == [
-        "https://github.com/adpena/reproq-worker/releases/download/v0.0.147/reproq-linux-amd64"
+        "https://github.com/adpena/reproq-worker/releases/download/v0.0.148/reproq-linux-amd64"
     ]
     assert len(installation[1]) == 1
 

@@ -7,7 +7,7 @@ import shutil
 import subprocess
 import tempfile
 
-DEFAULT_WORKER_TAG = "v0.0.147"
+DEFAULT_WORKER_TAG = "v0.0.148"
 
 
 def build_verified_source(source, destination, *, system, architecture):
