@@ -49,9 +49,10 @@ Package builds require `setuptools>=84.1.0` and `wheel>=0.46.2`.
 
 ## ⚡ Quickstart
 
-The 0.1.536 / Worker 0.0.148 pair below is a source candidate pending artifact
-qualification and publication. Installation examples for those versions apply
-only after publication; use the reviewed local SDK and Worker for candidate testing.
+These instructions target SDK 0.1.536 and Worker 0.0.148. Source preparation,
+artifact qualification and publication are separate. Use the PyPI and GitHub
+installation commands only when the matching artifacts are published; for an
+unpublished candidate, use the reviewed local SDK and Worker.
 
 [SDK 0.1.536](https://pypi.org/project/reproq-django/0.1.536/) defaults to
 [Reproq Worker v0.0.148](https://github.com/adpena/reproq-worker/releases/tag/v0.0.148)
