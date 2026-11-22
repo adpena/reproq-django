@@ -13,6 +13,7 @@ from django.core.cache import cache
 from django.http import JsonResponse
 from django.shortcuts import render
 from django.urls import reverse
+from django.views.decorators.cache import never_cache
 from django.views.decorators.csrf import csrf_exempt
 
 PAIR_TTL_SECONDS = 10 * 60
@@ -244,6 +245,7 @@ def _load_pair(code):
 
 
 @csrf_exempt
+@never_cache
 def tui_pair(request):
     if not _tui_enabled():
         return JsonResponse({"error": "tui auth disabled"}, status=404)
@@ -262,6 +264,7 @@ def tui_pair(request):
     return JsonResponse(payload)
 
 
+@never_cache
 def tui_pair_status(request, code):
     if not _tui_enabled():
         return JsonResponse({"error": "tui auth disabled"}, status=404)
@@ -285,6 +288,7 @@ def tui_config(request):
     return JsonResponse(payload)
 
 
+@never_cache
 @login_required(login_url="reproq-tui-login")
 def tui_authorize(request):
     if not _tui_enabled():

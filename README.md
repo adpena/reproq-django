@@ -49,29 +49,23 @@ Package builds require `setuptools>=84.1.0` and `wheel>=0.46.2`.
 
 ## ⚡ Quickstart
 
-These instructions show installation from the published SDK 0.1.536 and pair it
-with [Worker v0.0.149](https://github.com/adpena/reproq-worker/releases/tag/v0.0.149).
-Use the reviewed local SDK for development with the 0.1.537 candidate until its
-artifacts are published.
-
-[SDK 0.1.536](https://pypi.org/project/reproq-django/0.1.536/) defaults to
-[Reproq Worker v0.0.148](https://github.com/adpena/reproq-worker/releases/tag/v0.0.148)
-with `worker_python_bin:1` and the migration-owned schema-v2/executor-protocol2
-contract. Worker v0.0.145 also implements that contract. For upgrades from
-older queue schemas, follow the historical-schema adoption and draining
-requirements below.
+[SDK 0.1.537](https://pypi.org/project/reproq-django/0.1.537/) defaults to
+[Worker v0.0.149](https://github.com/adpena/reproq-worker/releases/tag/v0.0.149).
+The pair uses `worker_python_bin:1` and the migration-owned schema-v2/executor-protocol2
+contract. For upgrades from older queue schemas, follow the historical-schema
+adoption and draining requirements below.
 
 ### 1. Install
-Install SDK 0.1.536 from PyPI:
+Install SDK 0.1.537 from PyPI:
 
 ```bash
-uv add 'reproq-django==0.1.536'
+uv add 'reproq-django==0.1.537'
 ```
 
 Alternatively, use the version-pinned GitHub release tag:
 
 ```bash
-uv add "reproq-django @ git+https://github.com/adpena/reproq-django.git@v0.1.536"
+uv add "reproq-django @ git+https://github.com/adpena/reproq-django.git@v0.1.537"
 ```
 
 For reviewed paired development, add the local SDK instead:
@@ -138,8 +132,8 @@ flags when migration execution must be deferred.
 ### 5. Install a Worker separately when needed
 
 Skip this step if bootstrap already installed the Worker. The installer detects
-the OS and architecture and fetches that tag's binary from GitHub. The 0.1.537
-SDK candidate selects v0.0.149 by default. With published SDK 0.1.536, use the
+the OS and architecture and fetches that tag's binary from GitHub. SDK 0.1.537
+selects v0.0.149 by default. With SDK 0.1.536, use the
 explicit tag and checksum to select v0.0.149.
 
 Downloads must match the publisher's checksum sidecar or GitHub release-asset
@@ -771,6 +765,8 @@ to the worker metrics proxy endpoints. If you do not want to expose SSE, set
 `REPROQ_TUI_DISABLE_EVENTS=1` to omit the `/reproq/tui/events/` stream from the
 TUI config payload.
 If `METRICS_AUTH_TOKEN` is unset, the TUI auth endpoints return 404.
+The pairing issuance, status and authorization views add `Cache-Control: no-store`
+to their responses.
 
 Set `LOW_MEMORY_MODE=1` to disable the worker proxy endpoints
 (`/reproq/tui/metrics/`, `/reproq/tui/healthz/`, `/reproq/tui/events/`). The
