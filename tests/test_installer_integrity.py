@@ -141,14 +141,21 @@ def test_pinned_download_error_cannot_fall_back_to_existing_source(installation,
 
 
 def test_default_install_uses_official_release_digest_without_sidecar(installation, monkeypatch):
+    from django.core.management import call_command
+
     requests = serve(monkeypatch, document={"assets": [
         {"name": "reproq-linux-amd64", "digest": "sha256:" + DIGEST},
         {"name": "reproq-darwin-arm64", "digest": "sha256:" + "0" * 64},
     ]})
-    reproq.Command().run_install({"tag": "v0.0.144"})
+    call_command("reproq", "install", stdout=io.StringIO())
     assert installation[0].read_bytes() == BINARY
     assert len(installation[1]) == 1
-    assert requests[-1] == "https://api.github.com/repos/adpena/reproq-worker/releases/tags/v0.0.144"
+    assert not installation[2]
+    assert requests == [
+        "https://github.com/adpena/reproq-worker/releases/download/v0.0.149/reproq-linux-amd64",
+        "https://github.com/adpena/reproq-worker/releases/download/v0.0.149/reproq-linux-amd64.sha256",
+        "https://api.github.com/repos/adpena/reproq-worker/releases/tags/v0.0.149",
+    ]
 
 
 @pytest.mark.parametrize("document", [
@@ -200,14 +207,14 @@ def test_every_install_entry_point_accepts_the_same_integrity_arguments(subcomma
 def test_every_install_entry_point_defaults_to_the_sdk_tested_worker(subcommand):
     parser = reproq.Command().create_parser("manage.py", "reproq")
     options = parser.parse_args([subcommand])
-    assert options.tag == reproq.DEFAULT_WORKER_TAG == "v0.0.148"
+    assert options.tag == reproq.DEFAULT_WORKER_TAG == "v0.0.149"
 
 
 def test_default_download_uses_an_immutable_compatible_release(installation, monkeypatch):
     requests = serve(monkeypatch)
     reproq.Command().run_install({"sha256": DIGEST})
     assert requests == [
-        "https://github.com/adpena/reproq-worker/releases/download/v0.0.148/reproq-linux-amd64"
+        "https://github.com/adpena/reproq-worker/releases/download/v0.0.149/reproq-linux-amd64"
     ]
     assert len(installation[1]) == 1
 

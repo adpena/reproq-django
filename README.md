@@ -49,10 +49,10 @@ Package builds require `setuptools>=84.1.0` and `wheel>=0.46.2`.
 
 ## ⚡ Quickstart
 
-These instructions target SDK 0.1.536 and Worker 0.0.148. Source preparation,
-artifact qualification and publication are separate. Use the PyPI and GitHub
-installation commands only when the matching artifacts are published; for an
-unpublished candidate, use the reviewed local SDK and Worker.
+These instructions show installation from the published SDK 0.1.536 and pair it
+with [Worker v0.0.149](https://github.com/adpena/reproq-worker/releases/tag/v0.0.149).
+Use the reviewed local SDK for development with the 0.1.537 candidate until its
+artifacts are published.
 
 [SDK 0.1.536](https://pypi.org/project/reproq-django/0.1.536/) defaults to
 [Reproq Worker v0.0.148](https://github.com/adpena/reproq-worker/releases/tag/v0.0.148)
@@ -62,13 +62,13 @@ older queue schemas, follow the historical-schema adoption and draining
 requirements below.
 
 ### 1. Install
-After publication, install SDK 0.1.536 from PyPI:
+Install SDK 0.1.536 from PyPI:
 
 ```bash
 uv add 'reproq-django==0.1.536'
 ```
 
-After publication, alternatively use the version-pinned GitHub release tag:
+Alternatively, use the version-pinned GitHub release tag:
 
 ```bash
 uv add "reproq-django @ git+https://github.com/adpena/reproq-django.git@v0.1.536"
@@ -116,12 +116,14 @@ def send_welcome_email(user_id: int) -> str:
 ### 4. Bootstrap (Recommended)
 Bootstrap writes a config file, installs the worker binary, and applies committed
 Django migrations. This package's migrations own the queue schema.
+Set `WORKER_SHA256` to the SHA-256 published for your platform in the
+[v0.0.149 release](https://github.com/adpena/reproq-worker/releases/tag/v0.0.149).
 
 ```bash
-uv run python manage.py reproq init
+uv run python manage.py reproq init --tag v0.0.149 --sha256 "$WORKER_SHA256"
 ```
 
-For reviewed paired development, select the local v0.0.148 worker and skip
+For reviewed paired development, select the local v0.0.149 worker and skip
 the hosted download:
 
 ```bash
@@ -133,23 +135,21 @@ project-wide invocation; `--skip-worker-migrate` skips the separate ReproQ-only
 invocation. Both invocations use the same committed Django migrations. Use both
 flags when migration execution must be deferred.
 
-### 5. Download the Compatible Worker
-SDK 0.1.536 selects the compatible v0.0.148 tag by default:
+### 5. Install a Worker separately when needed
 
-```bash
-uv run python manage.py reproq install
-```
-The installer detects the OS/architecture and fetches that tag's pre-built
-binary from GitHub. Reviewed paired development can use the local selector above.
+Skip this step if bootstrap already installed the Worker. The installer detects
+the OS and architecture and fetches that tag's binary from GitHub. The 0.1.537
+SDK candidate selects v0.0.149 by default. With published SDK 0.1.536, use the
+explicit tag and checksum to select v0.0.149.
 
 Downloads must match the publisher's checksum sidecar or GitHub release-asset
 SHA-256 digest before the binary is made executable or its version is queried.
 For reproducible deployment, pin both a release tag and the digest of the
-binary for the target OS and architecture. For v0.0.148, use the reviewed digest
+binary for the target OS and architecture. For v0.0.149, use the reviewed digest
 of that release's binary for the selected platform:
 
 ~~~bash
-uv run python manage.py reproq install --tag v0.0.148 --sha256 <platform-binary-sha256>
+uv run python manage.py reproq install --tag v0.0.149 --sha256 "$WORKER_SHA256"
 ~~~
 
 The same options work with init and upgrade. An explicit digest disables
