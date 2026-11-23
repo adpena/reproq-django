@@ -49,24 +49,22 @@ Package builds require `setuptools>=84.1.0` and `wheel>=0.46.2`.
 
 ## ⚡ Quickstart
 
-[SDK 0.1.537](https://pypi.org/project/reproq-django/0.1.537/) defaults to
+[ReproQ Django](https://pypi.org/project/reproq-django/) defaults to
 [Worker v0.0.149](https://github.com/adpena/reproq-worker/releases/tag/v0.0.149).
 The pair uses `worker_python_bin:1` and the migration-owned schema-v2/executor-protocol2
 contract. For upgrades from older queue schemas, follow the historical-schema
 adoption and draining requirements below.
 
 ### 1. Install
-Install SDK 0.1.537 from PyPI:
+Install the SDK from PyPI.
 
 ```bash
-uv add 'reproq-django==0.1.537'
+uv add reproq-django
 ```
 
-Alternatively, use the version-pinned GitHub release tag:
-
-```bash
-uv add "reproq-django @ git+https://github.com/adpena/reproq-django.git@v0.1.537"
-```
+Pin a version in a deployment lockfile. The
+[GitHub release tags](https://github.com/adpena/reproq-django/tags) identify
+the source commit for each tagged SDK version.
 
 For reviewed paired development, add the local SDK instead:
 
